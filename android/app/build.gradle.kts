@@ -29,11 +29,23 @@ android {
         versionName = flutter.versionName
     }
 
+    // CI passes the key that signed the installed app via PB_KEYSTORE, so its
+    // APKs install as updates. Local builds use the machine's debug key.
+    val sharedKeystore = System.getenv("PB_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (sharedKeystore != null) {
+            create("shared") {
+                storeFile = sharedKeystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (sharedKeystore != null) "shared" else "debug")
         }
     }
 }

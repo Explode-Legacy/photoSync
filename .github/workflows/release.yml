@@ -15,8 +15,8 @@ jobs:
   android:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -34,13 +34,20 @@ jobs:
             echo "::warning::ANDROID_DEBUG_KEYSTORE is not set; this APK won't install over an existing copy."
             exit 0
           fi
-          mkdir -p ~/.android
-          echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/signing.keystore"
+          echo "PB_KEYSTORE=$RUNNER_TEMP/signing.keystore" >> "$GITHUB_ENV"
       - run: flutter pub get
       - run: flutter test
       - run: flutter build apk --release
       - run: cp build/app/outputs/flutter-apk/app-release.apk PhotoBridge.apk
-      - uses: actions/upload-artifact@v4
+      # Fail rather than publish an APK that can't update the installed app.
+      - name: Check signing certificate
+        if: env.PB_KEYSTORE != ''
+        run: |
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner
+          "$apksigner" verify --print-certs PhotoBridge.apk | tee certs.txt
+          grep -q e4ad90903c06522bec4bd5ca8efc0f2a3d73d558d3aa9f4ae1f9cd168c9beb20 certs.txt
+      - uses: actions/upload-artifact@v5
         with:
           name: PhotoBridge.apk
           path: PhotoBridge.apk
@@ -48,7 +55,7 @@ jobs:
   ios:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -61,7 +68,7 @@ jobs:
           mkdir Payload
           cp -R build/ios/iphoneos/Runner.app Payload/
           zip -qry PhotoBridge.ipa Payload
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: PhotoBridge.ipa
           path: PhotoBridge.ipa
@@ -73,7 +80,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           merge-multiple: true
       - name: Publish release
