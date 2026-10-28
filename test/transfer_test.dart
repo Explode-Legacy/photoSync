@@ -70,6 +70,7 @@ void main() {
           have.add('${f.senderId}|${f.assetId}');
           expect(f.kind, 'video');
           expect(f.created, DateTime.fromMillisecondsSinceEpoch(1700000000000));
+          expect(f.location, (12.9716, 77.5946));
         },
         tempRoot: tmp,
       );
@@ -99,6 +100,7 @@ void main() {
         name: 'Trip clip #1.MOV',
         kind: 'video',
         created: DateTime.fromMillisecondsSinceEpoch(1700000000000),
+        location: (12.9716, 77.5946),
         onProgress: (s, _) => lastProgress = s,
       );
 

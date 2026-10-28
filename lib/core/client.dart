@@ -72,6 +72,7 @@ class PeerClient {
     required String name,
     required String kind,
     required DateTime created,
+    (double, double)? location,
     void Function(int sent, int total)? onProgress,
   }) async {
     final total = await file.length();
@@ -85,6 +86,11 @@ class PeerClient {
       ..set(Hdr.fileName, Uri.encodeComponent(name))
       ..set(Hdr.kind, kind)
       ..set(Hdr.created, created.millisecondsSinceEpoch.toString());
+    if (location case (final lat, final lng)) {
+      req.headers
+        ..set(Hdr.lat, lat.toString())
+        ..set(Hdr.lng, lng.toString());
+    }
 
     var sent = 0;
     await req.addStream(

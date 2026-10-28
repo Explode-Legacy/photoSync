@@ -16,6 +16,10 @@ abstract final class Hdr {
   static const fileName = 'x-pb-name';
   static const created = 'x-pb-created';
   static const kind = 'x-pb-kind';
+
+  /// Capture location from the sender's library, as decimal degrees.
+  static const lat = 'x-pb-lat';
+  static const lng = 'x-pb-lng';
 }
 
 /// What another device reports about itself at `GET /info`.

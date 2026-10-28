@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:native_exif/native_exif.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 /// A photo/video exported to a readable file for upload.
@@ -90,13 +91,20 @@ class MediaLibrary {
   }
 
   /// Saves a received file into the gallery and returns the new asset id.
+  ///
+  /// [created] and [location] come from the sender's library. They matter
+  /// for files that carry no metadata of their own, such as WhatsApp images.
   Future<String> save(
     File file, {
     required String name,
     required String kind,
     DateTime? created,
+    (double, double)? location,
   }) async {
-    final AssetEntity entity;
+    if (Platform.isAndroid && kind == 'image') {
+      await _stampExif(file.path, created, location);
+    }
+    AssetEntity entity;
     if (kind == 'video') {
       entity = await PhotoManager.editor.saveVideo(
         file,
@@ -110,8 +118,71 @@ class MediaLibrary {
         title: name,
         relativePath: 'Pictures/PhotoBridge',
         creationDate: created,
+        latitude: location?.$1,
+        longitude: location?.$2,
       );
     }
+    // Android's media scanner overwrites "date taken" with the file's own
+    // time when there is no EXIF date (always for videos), so set it again.
+    if (Platform.isAndroid && created != null) {
+      try {
+        entity = await PhotoManager.editor.android.updateCreationDate(
+          entity: entity,
+          creationDate: created,
+        );
+      } catch (_) {}
+    }
     return entity.id;
+  }
+
+  /// Formats Android's ExifInterface can write.
+  static final _exifWritable = RegExp(
+    r'\.(jpe?g|png|webp)$',
+    caseSensitive: false,
+  );
+
+  /// Fills in the capture date and GPS when the image lacks them. Existing
+  /// values (e.g. camera photos) are never touched.
+  Future<void> _stampExif(
+    String path,
+    DateTime? created,
+    (double, double)? location,
+  ) async {
+    if (!_exifWritable.hasMatch(path)) return;
+    if (created == null && location == null) return;
+    Exif? exif;
+    try {
+      exif = await Exif.fromPath(path);
+      final values = <String, Object>{};
+      if (created != null && await exif.getOriginalDate() == null) {
+        final local = created.toLocal();
+        final stamp = _exifDate(local);
+        values['DateTimeOriginal'] = stamp;
+        values['DateTimeDigitized'] = stamp;
+        values['DateTime'] = stamp;
+        values['OffsetTimeOriginal'] = _exifOffset(local.timeZoneOffset);
+      }
+      if (location case (final lat, final lng)
+          when await exif.getLatLong() == null) {
+        values['GPSLatitude'] = lat;
+        values['GPSLongitude'] = lng;
+      }
+      if (values.isNotEmpty) await exif.writeAttributes(values);
+    } catch (_) {
+      // Unreadable metadata: save the file as it is.
+    } finally {
+      await exif?.close();
+    }
+  }
+
+  static String _two(int v) => v.toString().padLeft(2, '0');
+
+  static String _exifDate(DateTime t) =>
+      '${t.year}:${_two(t.month)}:${_two(t.day)} '
+      '${_two(t.hour)}:${_two(t.minute)}:${_two(t.second)}';
+
+  static String _exifOffset(Duration d) {
+    final m = d.inMinutes.abs();
+    return '${d.isNegative ? '-' : '+'}${_two(m ~/ 60)}:${_two(m % 60)}';
   }
 }

@@ -13,6 +13,7 @@ class IncomingFile {
     required this.name,
     required this.kind,
     required this.created,
+    required this.location,
     required this.file,
   });
 
@@ -23,6 +24,9 @@ class IncomingFile {
   /// `image` or `video`.
   final String kind;
   final DateTime? created;
+
+  /// (latitude, longitude) from the sender's library, if it had one.
+  final (double, double)? location;
   final File file;
 }
 
@@ -130,6 +134,8 @@ class ReceiveServer {
     final name = _safeName(Uri.decodeComponent(h.value(Hdr.fileName) ?? ''));
     final createdMs = int.tryParse(h.value(Hdr.created) ?? '');
     final kind = h.value(Hdr.kind) == 'video' ? 'video' : 'image';
+    final lat = double.tryParse(h.value(Hdr.lat) ?? '');
+    final lng = double.tryParse(h.value(Hdr.lng) ?? '');
 
     // Unique temp folder per upload keeps the original file name intact.
     final dir = await _tmp.createTemp('u');
@@ -152,6 +158,7 @@ class ReceiveServer {
           created: createdMs == null
               ? null
               : DateTime.fromMillisecondsSinceEpoch(createdMs),
+          location: lat == null || lng == null ? null : (lat, lng),
           file: file,
         ),
       );

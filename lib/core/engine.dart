@@ -579,6 +579,13 @@ class SyncEngine {
     _changed();
   }
 
+  /// Photos says 0,0 when an asset has no location.
+  static (double, double)? _locationOf(AssetEntity asset) {
+    final lat = asset.latitude, lng = asset.longitude;
+    if (lat == null || lng == null || (lat == 0 && lng == 0)) return null;
+    return (lat, lng);
+  }
+
   /// Returns true when a file was actually transferred.
   Future<bool> _sendOne(Peer target, AssetEntity asset, int i, int n) async {
     final ledgerKey = '${target.info.id}|${asset.id}';
@@ -599,6 +606,7 @@ class SyncEngine {
       name: exported.name,
       kind: exported.kind,
       created: asset.createDateTime,
+      location: _locationOf(asset),
       onProgress: (sent, total) {
         final now = _now();
         if (now - lastNotify < 150) return;
@@ -632,6 +640,7 @@ class SyncEngine {
       name: f.name,
       kind: f.kind,
       created: f.created,
+      location: f.location,
     );
     // Record the import first so a library-change sync never echoes it back.
     await _imported.add(localId);
