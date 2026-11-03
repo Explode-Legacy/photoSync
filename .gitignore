@@ -49,3 +49,6 @@ app.*.map.json
 
 # Release binaries (published as GitHub release assets)
 /dist/
+
+# Gradle build output
+/android/build/
