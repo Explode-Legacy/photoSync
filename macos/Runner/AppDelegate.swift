@@ -42,8 +42,7 @@ final class SharedFiles: NSObject, FlutterAppLifecycleDelegate {
     self.channel = channel
   }
 
-  @objc(handleOpenURLs:)
-  func handleOpenURLs(_ urls: [URL]) -> Bool {
+  func handleOpen(_ urls: [URL]) -> Bool {
     let paths = urls.filter(\.isFileURL).map(\.path)
     guard !paths.isEmpty else { return false }
     pending += paths
