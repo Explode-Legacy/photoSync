@@ -97,9 +97,9 @@ class FolderLibrary implements PhotoSource {
   }
 
   /// Fires when anything in the folder changes; the engine debounces.
+  /// Creates the folder first, so a new (default) folder is watched too.
   Stream<void> watch() {
-    final dir = Directory(root());
-    if (!dir.existsSync()) return const Stream.empty();
+    final dir = Directory(root())..createSync(recursive: true);
     return dir.watch(recursive: true).map((_) {});
   }
 }
