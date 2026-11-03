@@ -8,6 +8,7 @@ import '../core/settings.dart';
 import '../core/shared_inbox.dart';
 import '../core/sync_client.dart';
 import 'devices_page.dart';
+import 'format.dart';
 import 'picker_page.dart';
 import 'send_files.dart';
 import 'settings_page.dart';
@@ -91,6 +92,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         state: s,
                         onTap: () => _open(DevicesPage(client: c)),
                       ),
+                      for (final r in s.incoming) ...[
+                        const SizedBox(height: 12),
+                        _ReceivingCard(info: r),
+                      ],
                       const SizedBox(height: 12),
                       _SyncCard(
                         state: s,
@@ -258,11 +263,13 @@ class _SyncCard extends StatelessWidget {
               ),
               const SizedBox(height: 6),
               Text(
-                '${(p['done'] as int) + 1} of ${p['total']} · ${p['current']}',
+                '${(p['done'] as int) + 1} of ${p['total']} · ${p['current']}'
+                '${p['to'] != null ? ' → ${p['to']}' : ''}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: text.bodySmall,
               ),
+              Text(formatTransfer(p), style: text.bodySmall),
             ],
             const SizedBox(height: 16),
             Row(
@@ -294,6 +301,50 @@ class _SyncCard extends StatelessWidget {
                 ],
               ],
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A file arriving from another device, with percentage and speed.
+class _ReceivingCard extends StatelessWidget {
+  const _ReceivingCard({required this.info});
+
+  final Map<String, dynamic> info;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final size = (info['size'] as num?) ?? 0;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.south_west, color: Colors.green, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Receiving ${info['current']} from ${info['from']}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: text.bodyMedium,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            LinearProgressIndicator(
+              value: size == 0 ? null : (info['frac'] as num).toDouble(),
+              color: Colors.green,
+            ),
+            const SizedBox(height: 6),
+            Text(formatTransfer(info), style: text.bodySmall),
           ],
         ),
       ),

@@ -56,6 +56,11 @@ class EngineState {
   ];
   bool get syncing => raw['syncing'] == true;
   Map<String, dynamic>? get progress => (raw['progress'] as Map?)?.cast();
+
+  /// Files arriving right now (see SyncEngine.incoming).
+  List<Map<String, dynamic>> get incoming => [
+    for (final e in (raw['incoming'] as List? ?? [])) (e as Map).cast(),
+  ];
   int get sentCount => raw['sentCount'] as int? ?? 0;
   int get receivedCount => raw['receivedCount'] as int? ?? 0;
 }

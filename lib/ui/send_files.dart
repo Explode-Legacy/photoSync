@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../core/file_store.dart';
 import '../core/sync_client.dart';
+import 'format.dart';
 
 /// A file to send: where to read it, and where it goes on the other phone.
 typedef PickedFile = ({String path, String name, String dir, int size});
@@ -100,10 +101,10 @@ class FileSender {
     if (files.isEmpty) return;
     final total = files.fold<int>(0, (sum, f) => sum + f.size);
     final what = folder != null
-        ? 'the folder "$folder" (${_count(files.length)}, ${_size(total)})'
+        ? 'the folder "$folder" (${_count(files.length)}, ${formatBytes(total)})'
         : files.length == 1
-        ? '"${files.first.name}" (${_size(total)})'
-        : '${_count(files.length)} (${_size(total)})';
+        ? '"${files.first.name}" (${formatBytes(total)})'
+        : '${_count(files.length)} (${formatBytes(total)})';
     final to = await showDialog<List<String>>(
       context: context,
       builder: (_) => _SendDialog(client: client, what: what),
@@ -143,17 +144,6 @@ class FileSender {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 
   static String _count(int n) => n == 1 ? '1 file' : '$n files';
-
-  static String _size(int bytes) {
-    const units = ['B', 'KB', 'MB', 'GB'];
-    var v = bytes.toDouble();
-    var u = 0;
-    while (v >= 1024 && u < units.length - 1) {
-      v /= 1024;
-      u++;
-    }
-    return '${v.toStringAsFixed(u == 0 ? 0 : 1)} ${units[u]}';
-  }
 }
 
 class _AccessDenied implements Exception {}

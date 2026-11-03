@@ -42,8 +42,21 @@ class ReceiveServer {
     required this.alreadyHave,
     required this.onFile,
     this.acceptsPhotos = _always,
+    this.onReceiving,
     this.tempRoot,
   });
+
+  /// Upload progress as bytes arrive: [received] of [total] (-1 if
+  /// unknown). Called with `done: true` once, when the upload ends either way.
+  final void Function(
+    String key,
+    String senderId,
+    String name,
+    int received,
+    int total, {
+    bool done,
+  })?
+  onReceiving;
 
   static bool _always() => true;
 
@@ -163,9 +176,28 @@ class ReceiveServer {
     final dir = await _tmp.createTemp('u');
     final file = File('${dir.path}/$name');
     try {
+      final key = '$sender|$asset';
+      var received = 0;
       final sink = file.openWrite();
-      await sink.addStream(req);
-      await sink.close();
+      try {
+        await sink.addStream(
+          req.map((chunk) {
+            received += chunk.length;
+            onReceiving?.call(key, sender, name, received, req.contentLength);
+            return chunk;
+          }),
+        );
+      } finally {
+        await sink.close();
+        onReceiving?.call(
+          key,
+          sender,
+          name,
+          received,
+          req.contentLength,
+          done: true,
+        );
+      }
 
       final expected = req.contentLength;
       if (expected >= 0 && await file.length() != expected) {

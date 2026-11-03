@@ -95,6 +95,16 @@ class SyncEngine {
 
   bool syncing = false;
   Map<String, dynamic>? _progress;
+
+  /// Uploads arriving right now, by sender|asset.
+  final Map<String, (_SpeedMeter, Map<String, dynamic>)> _incoming = {};
+
+  /// What's arriving right now: current (name), from, frac, bytes, size,
+  /// speed. Usually one entry; more when several devices send at once.
+  List<Map<String, dynamic>> get incoming => [
+    for (final (_, info) in _incoming.values)
+      if (info.isNotEmpty) info,
+  ];
   int sentCount = 0;
   int receivedCount = 0;
 
@@ -165,6 +175,7 @@ class SyncEngine {
       },
       currentKey: () => settings.syncKey,
       acceptsPhotos: () => settings.inbound,
+      onReceiving: _onReceiving,
       alreadyHave: (sender, asset) => _received.contains('$sender|$asset'),
       onFile: _onIncoming,
     );
@@ -244,6 +255,7 @@ class SyncEngine {
       'log': _log,
       'syncing': syncing,
       'progress': _progress,
+      'incoming': incoming,
       'sentCount': sentCount,
       'receivedCount': receivedCount,
       'mode': mode.name,
@@ -742,7 +754,6 @@ class SyncEngine {
         }
         var delivered = false;
         for (final t in [...active]) {
-          var lastNotify = 0;
           try {
             await _client.upload(
               t,
@@ -753,17 +764,7 @@ class SyncEngine {
               kind: 'file',
               dir: f.dir,
               created: await file.lastModified(),
-              onProgress: (sent, total) {
-                final now = _now();
-                if (now - lastNotify < 150) return;
-                lastNotify = now;
-                _setProgress(
-                  i,
-                  files.length,
-                  f.name,
-                  total == 0 ? 1 : sent / total,
-                );
-              },
+              onProgress: _progressFor(i, files.length, f.name, t),
             );
             delivered = true;
           } on Exception catch (e) {
@@ -789,9 +790,56 @@ class SyncEngine {
 
   static String _countFiles(int n) => n == 1 ? '1 file' : '$n files';
 
-  void _setProgress(int done, int total, String name, double frac) {
-    _progress = {'done': done, 'total': total, 'current': name, 'frac': frac};
+  /// What's being sent right now, for the UI and the Android notification:
+  /// item [done] of [total], [frac] of the current file, its [bytes] of
+  /// [size], [speed] in bytes/s, and the device it's going [to].
+  Map<String, dynamic>? get progress => _progress;
+
+  void _setProgress(
+    int done,
+    int total,
+    String name,
+    double frac, {
+    int bytes = 0,
+    int size = 0,
+    double? speed,
+    String? to,
+  }) {
+    _progress = {
+      'done': done,
+      'total': total,
+      'current': name,
+      'frac': frac,
+      'bytes': bytes,
+      'size': size,
+      'speed': ?speed,
+      'to': ?to,
+    };
     _changed();
+  }
+
+  /// Upload progress callback for one file to [target]: updates the
+  /// percentage and a smoothed speed, a few times a second.
+  void Function(int sent, int total) _progressFor(
+    int i,
+    int n,
+    String name,
+    Peer target,
+  ) {
+    final meter = _SpeedMeter();
+    return (sent, total) {
+      if (!meter.update(sent, force: sent >= total)) return;
+      _setProgress(
+        i,
+        n,
+        name,
+        total == 0 ? 1 : sent / total,
+        bytes: sent,
+        size: total,
+        speed: meter.speed,
+        to: peers.length > 1 ? target.info.name : null,
+      );
+    };
   }
 
   /// Returns true when a file was actually transferred.
@@ -812,7 +860,6 @@ class SyncEngine {
       _addLog('error', 'Could not read ${item.title}');
       return false;
     }
-    var lastNotify = 0;
     final status = await _client.upload(
       target,
       assetId: item.id,
@@ -821,12 +868,7 @@ class SyncEngine {
       kind: exported.kind,
       created: item.created,
       location: item.location,
-      onProgress: (sent, total) {
-        final now = _now();
-        if (now - lastNotify < 150) return;
-        lastNotify = now;
-        _setProgress(i, n, exported.name, total == 0 ? 1 : sent / total);
-      },
+      onProgress: _progressFor(i, n, exported.name, target),
     );
     await _sent.add(ledgerKey);
     if (status == 'saved') sentCount++;
@@ -846,6 +888,36 @@ class SyncEngine {
   }
 
   // ---------------------------------------------------------------- receiving
+
+  void _onReceiving(
+    String key,
+    String senderId,
+    String name,
+    int received,
+    int total, {
+    bool done = false,
+  }) {
+    if (done) {
+      if (_incoming.remove(key) != null) _changed();
+      return;
+    }
+    final (meter, info) = _incoming.putIfAbsent(
+      key,
+      () => (_SpeedMeter(), <String, dynamic>{}),
+    );
+    if (!meter.update(received, force: received == total)) return;
+    info
+      ..['current'] = name
+      ..['from'] =
+          peers[senderId]?.info.name ??
+          _devices[senderId]?['name'] ??
+          'another device'
+      ..['frac'] = total > 0 ? received / total : 0.0
+      ..['bytes'] = received
+      ..['size'] = total > 0 ? total : 0
+      ..['speed'] = meter.speed;
+    _changed();
+  }
 
   Future<void> _onIncoming(IncomingFile f) async {
     if (f.kind == 'file') {
@@ -878,5 +950,27 @@ class SyncEngine {
     await _discovery.stop();
     await _server?.stop();
     _client.close();
+  }
+}
+
+/// Smoothed transfer speed (bytes/s) from a running byte count.
+class _SpeedMeter {
+  final _clock = Stopwatch()..start();
+  int _lastMs = 0;
+  int _lastBytes = 0;
+  double? speed;
+
+  /// Records [bytes] so far. Returns false when called again too soon to be
+  /// worth showing (under ~150 ms), unless [force].
+  bool update(int bytes, {bool force = false}) {
+    final ms = _clock.elapsedMilliseconds;
+    if (ms - _lastMs < 150 && !force) return false;
+    if (ms > _lastMs) {
+      final now = (bytes - _lastBytes) * 1000 / (ms - _lastMs);
+      speed = speed == null ? now : speed! * 0.7 + now * 0.3;
+    }
+    _lastMs = ms;
+    _lastBytes = bytes;
+    return true;
   }
 }

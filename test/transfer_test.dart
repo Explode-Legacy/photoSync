@@ -56,12 +56,14 @@ void main() {
     final received = <String, List<int>>{};
     final have = <String>{};
     final incoming = <IncomingFile>[];
+    final receiving = <(int, int, bool)>[];
     var key = 'SECRET12';
 
     setUp(() async {
       tmp = await Directory.systemTemp.createTemp('pb');
       received.clear();
       incoming.clear();
+      receiving.clear();
       have.clear();
       key = 'SECRET12';
       server = ReceiveServer(
@@ -77,6 +79,8 @@ void main() {
           expect(f.created, DateTime.fromMillisecondsSinceEpoch(1700000000000));
           expect(f.location, (12.9716, 77.5946));
         },
+        onReceiving: (_, _, _, got, total, {done = false}) =>
+            receiving.add((got, total, done)),
         tempRoot: tmp,
       );
       await server.start();
@@ -112,6 +116,11 @@ void main() {
       expect(await client.has(peer, 'A1'), isFalse);
       expect(await send(), 'saved');
       expect(lastProgress, src.lengthSync());
+      // The receiver counted every byte, then reported the end once.
+      final size = src.lengthSync();
+      expect(receiving.last, (size, size, true));
+      expect(receiving.where((r) => r.$3), hasLength(1));
+      expect(receiving.length, greaterThan(2));
       expect(received['Trip clip #1.MOV'], src.readAsBytesSync());
       expect(await client.has(peer, 'A1'), isTrue);
       expect(await send(), 'duplicate');

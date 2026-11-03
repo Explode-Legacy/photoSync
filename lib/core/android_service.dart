@@ -84,7 +84,22 @@ class _EngineTask extends TaskHandler {
     final counts = e.receivedCount + e.sentCount == 0
         ? ''
         : ' · ↓${e.receivedCount} ↑${e.sentCount}';
+    if (e.incoming.firstOrNull case final r?) {
+      final pct = (((r['frac'] as num?) ?? 0) * 100).floor();
+      return 'Receiving ${r['current']} · $pct%${_mbps(r)}';
+    }
+    final p = e.progress;
+    if (e.syncing && p != null) {
+      final pct = (((p['frac'] as num?) ?? 0) * 100).floor();
+      return 'Sending ${(p['done'] as int) + 1} of ${p['total']} · '
+          '$pct%${_mbps(p)}';
+    }
     return e.syncing ? 'Sending…$counts' : '$where$counts';
+  }
+
+  static String _mbps(Map<String, dynamic> p) {
+    final speed = (p['speed'] as num?) ?? 0;
+    return speed > 0 ? ' · ${(speed / 1048576).toStringAsFixed(1)} MB/s' : '';
   }
 
   @override
