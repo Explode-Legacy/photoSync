@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:photo_manager/photo_manager.dart';
@@ -11,6 +12,9 @@ import 'ui/home_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // file_picker refuses to open dialogs without App Sandbox entitlements;
+  // the Mac app runs unsandboxed on purpose (see Release.entitlements).
+  if (Platform.isMacOS) await FilePicker.skipEntitlementsChecks();
   initAndroidService();
   await initIosBackground();
   runApp(const PhotoBridgeApp());

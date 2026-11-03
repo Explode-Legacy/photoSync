@@ -57,6 +57,7 @@ void main() {
     final have = <String>{};
     final incoming = <IncomingFile>[];
     final receiving = <(int, int, bool)>[];
+    final contacts = <(String, String, int)>[];
     var key = 'SECRET12';
 
     setUp(() async {
@@ -64,6 +65,7 @@ void main() {
       received.clear();
       incoming.clear();
       receiving.clear();
+      contacts.clear();
       have.clear();
       key = 'SECRET12';
       server = ReceiveServer(
@@ -81,10 +83,11 @@ void main() {
         },
         onReceiving: (_, _, _, got, total, {done = false}) =>
             receiving.add((got, total, done)),
+        onContact: (id, host, port) => contacts.add((id, host, port)),
         tempRoot: tmp,
       );
       await server.start();
-      client = PeerClient(selfId: 'send', key: () => key);
+      client = PeerClient(selfId: 'send', key: () => key, selfPort: () => 4242);
     });
 
     tearDown(() async {
@@ -97,6 +100,8 @@ void main() {
       final info = await client.probe('127.0.0.1', server.port);
       expect(info!.id, 'recv');
       expect(info.paired, isTrue);
+      // The receiver learns where to reach the caller back.
+      expect(contacts.last, ('send', '127.0.0.1', 4242));
       final peer = Peer(info, '127.0.0.1', server.port);
 
       final src = File('${tmp.path}/src.bin')

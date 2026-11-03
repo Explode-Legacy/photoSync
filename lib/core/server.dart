@@ -43,8 +43,14 @@ class ReceiveServer {
     required this.onFile,
     this.acceptsPhotos = _always,
     this.onReceiving,
+    this.onContact,
     this.tempRoot,
   });
+
+  /// A paired device reached us from [host]; its server listens on [port].
+  /// Lets us connect back even when we didn't know its address (e.g. it
+  /// came in over Tailscale, or its Wi-Fi address changed).
+  final void Function(String senderId, String host, int port)? onContact;
 
   /// Upload progress as bytes arrive: [received] of [total] (-1 if
   /// unknown). Called with `done: true` once, when the upload ends either way.
@@ -109,7 +115,21 @@ class ReceiveServer {
 
   bool _authorized(HttpRequest r) => r.headers.value(Hdr.key) == currentKey();
 
+  void _noteContact(HttpRequest req) {
+    final sender = req.headers.value(Hdr.sender);
+    final from = req.connectionInfo?.remoteAddress;
+    if (onContact == null || sender == null || from == null) return;
+    if (!_authorized(req)) return;
+    // Dual-stack sockets report IPv4 callers as ::ffff:a.b.c.d.
+    var host = from.address;
+    if (host.startsWith('::ffff:')) host = host.substring(7);
+    final port =
+        int.tryParse(req.headers.value(Hdr.port) ?? '') ?? kDefaultPort;
+    onContact!(sender, host, port);
+  }
+
   Future<void> _handle(HttpRequest req) async {
+    _noteContact(req);
     try {
       switch ((req.method, req.uri.path)) {
         case ('GET', '/info'):

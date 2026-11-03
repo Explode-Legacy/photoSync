@@ -23,10 +23,22 @@ class TransferException implements Exception {
 
 /// HTTP client side: talks to another phone's [ReceiveServer].
 class PeerClient {
-  PeerClient({required this.selfId, required this.key});
+  PeerClient({required this.selfId, required this.key, this.selfPort});
 
   final String selfId;
   final String Function() key;
+
+  /// Our server's port, sent so the other side can reach us back.
+  final int Function()? selfPort;
+
+  /// Identifies us on every request (see [ReceiveServer.onContact]).
+  void _identify(HttpClientRequest req) {
+    req.headers
+      ..set(Hdr.key, key())
+      ..set(Hdr.sender, selfId);
+    final port = selfPort?.call() ?? 0;
+    if (port > 0) req.headers.set(Hdr.port, '$port');
+  }
 
   final HttpClient _http = HttpClient()
     ..connectionTimeout = const Duration(seconds: 4)
@@ -44,7 +56,7 @@ class PeerClient {
   Future<PeerInfo?> probe(String host, int port) async {
     try {
       final req = await _http.getUrl(_uri(host, port, '/info'));
-      req.headers.set(Hdr.key, key());
+      _identify(req);
       final res = await req.close().timeout(const Duration(seconds: 4));
       if (res.statusCode != 200) {
         await res.drain<void>();
@@ -62,9 +74,7 @@ class PeerClient {
     final req = await _http.getUrl(
       _uri(peer.host, peer.port, '/has', {'asset': assetId}),
     );
-    req.headers
-      ..set(Hdr.key, key())
-      ..set(Hdr.sender, selfId);
+    _identify(req);
     final res = await req.close().timeout(const Duration(seconds: 10));
     final body = await utf8.decodeStream(res);
     _check(res.statusCode, body);
@@ -89,10 +99,9 @@ class PeerClient {
     final total = await file.length();
     final req = await _http.postUrl(_uri(peer.host, peer.port, '/upload'));
     req.contentLength = total;
+    _identify(req);
     req.headers
       ..contentType = ContentType.binary
-      ..set(Hdr.key, key())
-      ..set(Hdr.sender, selfId)
       ..set(Hdr.assetId, assetId)
       ..set(Hdr.fileName, Uri.encodeComponent(name))
       ..set(Hdr.kind, kind)

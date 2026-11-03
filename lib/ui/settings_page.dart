@@ -286,11 +286,18 @@ class _FolderTile extends StatelessWidget {
       isThreeLine: true,
       trailing: const Text('Change…'),
       onTap: () async {
-        final picked = await FilePicker.getDirectoryPath(
-          dialogTitle: title,
-          initialDirectory: path,
-        );
-        if (picked != null) onPick(picked);
+        try {
+          final picked = await FilePicker.getDirectoryPath(
+            dialogTitle: title,
+            initialDirectory: path,
+          );
+          if (picked != null) onPick(picked);
+        } catch (e) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context)
+                .showSnackBar(SnackBar(content: Text('Could not open: $e')));
+          }
+        }
       },
     );
   }

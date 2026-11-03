@@ -152,6 +152,7 @@ class SyncEngine {
     _client = PeerClient(
       selfId: settings.deviceId,
       key: () => settings.syncKey,
+      selfPort: () => port,
     );
     _discovery = LanDiscovery(selfId: settings.deviceId);
 
@@ -176,6 +177,7 @@ class SyncEngine {
       currentKey: () => settings.syncKey,
       acceptsPhotos: () => settings.inbound,
       onReceiving: _onReceiving,
+      onContact: _onContact,
       alreadyHave: (sender, asset) => _received.contains('$sender|$asset'),
       onFile: _onIncoming,
     );
@@ -446,6 +448,8 @@ class SyncEngine {
         for (final p in settings.savedPeers) ?parseAddress(p.address),
         ?parseAddress(settings.lastPeer),
         for (final p in peers.values) (p.host, p.port),
+        for (final c in _contacts.values)
+          if (DateTime.now().difference(c.seen) < _contactTtl) (c.host, c.port),
       }.toList();
 
       final results = await Future.wait(
@@ -505,6 +509,16 @@ class SyncEngine {
     } finally {
       _probing = false;
     }
+  }
+
+  /// Where paired devices last reached us from, by device id.
+  final Map<String, ({String host, int port, DateTime seen})> _contacts = {};
+  static const _contactTtl = Duration(minutes: 15);
+
+  void _onContact(String id, String host, int port) {
+    _contacts[id] = (host: host, port: port, seen: DateTime.now());
+    // A device we don't see yet just reached us: try connecting back now.
+    if (!peers.containsKey(id)) unawaited(_probe());
   }
 
   static Map<String, dynamic> _deviceJson(Peer p) => {

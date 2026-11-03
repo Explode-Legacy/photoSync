@@ -17,6 +17,10 @@ abstract final class Hdr {
   static const created = 'x-pb-created';
   static const kind = 'x-pb-kind';
 
+  /// The caller's own server port, so the receiver can connect back to it
+  /// at the address the request came from.
+  static const port = 'x-pb-port';
+
   /// Capture location from the sender's library, as decimal degrees.
   static const lat = 'x-pb-lat';
   static const lng = 'x-pb-lng';
