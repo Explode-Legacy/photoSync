@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -28,8 +29,19 @@ class EngineState {
       SavedPeer.fromJson((p as Map).cast()),
   ];
 
+  bool get inbound => _s['inbound'] != false;
+  String get photosFolder => _s['photosFolder'] as String? ?? '';
+  String get filesFolder => _s['filesFolder'] as String? ?? '';
+
   bool get hasPhotoAccess => raw['hasPhotoAccess'] == true;
-  Map<String, dynamic>? get peer => (raw['peer'] as Map?)?.cast();
+
+  /// Every connected device: id, name, os, address, via, inbound.
+  List<Map<String, dynamic>> get peers => [
+    for (final p in (raw['peers'] as List? ?? [])) (p as Map).cast(),
+  ];
+
+  /// First connected device, or null when none.
+  Map<String, dynamic>? get peer => peers.firstOrNull;
   List<Map<String, dynamic>> get devices => [
     for (final d in (raw['devices'] as List? ?? [])) (d as Map).cast(),
   ];
@@ -55,7 +67,7 @@ abstract class SyncClient extends ChangeNotifier {
   void send(String cmd, [Map<String, dynamic> args = const {}]);
 
   /// Platform-appropriate client: on Android the engine lives in a
-  /// foreground service; on iPhone it runs in the app.
+  /// foreground service; on iPhone and the Mac it runs in the app.
   static Future<SyncClient> create() async {
     if (defaultTargetPlatform == TargetPlatform.android) {
       return ServiceSyncClient.start();
@@ -64,7 +76,7 @@ abstract class SyncClient extends ChangeNotifier {
   }
 }
 
-/// Engine in this isolate (iPhone).
+/// Engine in this isolate (iPhone, Mac).
 class LocalSyncClient extends SyncClient {
   LocalSyncClient._(this._engine) {
     _engine.onChange = _refresh;
@@ -76,7 +88,7 @@ class LocalSyncClient extends SyncClient {
 
   static Future<LocalSyncClient> start() async {
     final engine = await SyncEngine.create(
-      EngineMode.foreground,
+      Platform.isMacOS ? EngineMode.desktop : EngineMode.foreground,
       hooks: IosContinuedSync.hooks,
     );
     IosContinuedSync.onExpired = () => engine.handle({'cmd': 'cancel'});

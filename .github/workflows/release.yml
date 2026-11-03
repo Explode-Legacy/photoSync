@@ -1,6 +1,6 @@
-# Builds the Android APK and an unsigned iOS IPA. Pushing a tag like
-# v1.0.1 publishes both as a GitHub release; a manual run just uploads
-# them as workflow artifacts.
+# Builds the Android APK, an unsigned iOS IPA and the Mac app (DMG). Pushing
+# a tag like v1.2.0 publishes them as a GitHub release; a manual run just
+# uploads them as workflow artifacts.
 name: Build and release
 
 on:
@@ -73,9 +73,31 @@ jobs:
           name: PhotoBridge.ipa
           path: PhotoBridge.ipa
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter pub get
+      # Ad-hoc signed ("Sign to Run Locally"); no Apple Developer account.
+      - run: flutter build macos --release
+      - name: Package DMG
+        run: |
+          mkdir dmg
+          cp -R build/macos/Build/Products/Release/PhotoBridge.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname PhotoBridge -srcfolder dmg -ov -format UDZO PhotoBridge-macOS.dmg
+      - uses: actions/upload-artifact@v5
+        with:
+          name: PhotoBridge-macOS.dmg
+          path: PhotoBridge-macOS.dmg
+
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [android, ios]
+    needs: [android, ios, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -87,7 +109,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" PhotoBridge.apk PhotoBridge.ipa \
+          gh release create "$GITHUB_REF_NAME" \
+            PhotoBridge.apk PhotoBridge.ipa PhotoBridge-macOS.dmg \
             --repo "$GITHUB_REPOSITORY" \
             --title "PhotoBridge ${GITHUB_REF_NAME#v}" \
             --generate-notes

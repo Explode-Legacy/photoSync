@@ -14,10 +14,59 @@ class ExportedAsset {
   final String kind;
 }
 
+/// One photo or video that can be sent, from whichever [PhotoSource].
+class SourceItem {
+  SourceItem({
+    required this.id,
+    required this.title,
+    required this.created,
+    required this.export,
+    this.location,
+  });
+
+  /// Stable id, used in the sent/imported ledgers.
+  final String id;
+  final String title;
+  final DateTime created;
+
+  /// (latitude, longitude), if known.
+  final (double, double)? location;
+
+  /// Gets a readable file for upload.
+  final Future<ExportedAsset?> Function() export;
+}
+
+/// Where a device's photos come from and where received ones go: the
+/// photo library on phones, a chosen folder on the Mac.
+abstract class PhotoSource {
+  Future<bool> requestPermission();
+
+  /// Everything that may need sending, oldest first.
+  Future<List<SourceItem>> pending({
+    required DateTime since,
+    required bool includeVideos,
+  });
+
+  Future<List<SourceItem>> byIds(List<String> ids);
+
+  /// Frees any temporary copies made by [SourceItem.export].
+  Future<void> releaseExports();
+
+  /// Saves a received photo or video and returns its new id.
+  Future<String> save(
+    File file, {
+    required String name,
+    required String kind,
+    DateTime? created,
+    (double, double)? location,
+  });
+}
+
 /// Thin wrapper around photo_manager for reading and saving media.
-class MediaLibrary {
+class MediaLibrary implements PhotoSource {
   static const _pageSize = 200;
 
+  @override
   Future<bool> requestPermission() async {
     final state = await PhotoManager.requestPermissionExtend();
     return state.hasAccess;
@@ -54,6 +103,36 @@ class MediaLibrary {
     return out;
   }
 
+  @override
+  Future<List<SourceItem>> pending({
+    required DateTime since,
+    required bool includeVideos,
+  }) async => [
+    for (final a in await assetsSince(since, includeVideos: includeVideos))
+      _item(a),
+  ];
+
+  @override
+  Future<List<SourceItem>> byIds(List<String> ids) async => [
+    for (final id in ids)
+      if (await AssetEntity.fromId(id) case final a?) _item(a),
+  ];
+
+  SourceItem _item(AssetEntity a) => SourceItem(
+    id: a.id,
+    title: a.title ?? a.id,
+    created: a.createDateTime,
+    location: _locationOf(a),
+    export: () => export(a),
+  );
+
+  /// Photos says 0,0 when an asset has no location.
+  static (double, double)? _locationOf(AssetEntity asset) {
+    final lat = asset.latitude, lng = asset.longitude;
+    if (lat == null || lng == null || (lat == 0 && lng == 0)) return null;
+    return (lat, lng);
+  }
+
   /// Newest-first page of the library, for the manual picker.
   Future<List<AssetEntity>> recentPage(int page, {int pageSize = 120}) {
     return PhotoManager.getAssetListPaged(
@@ -86,6 +165,7 @@ class MediaLibrary {
   }
 
   /// iOS copies originals into the plugin cache; free that space.
+  @override
   Future<void> releaseExports() async {
     if (Platform.isIOS) await PhotoManager.clearFileCache();
   }
@@ -94,6 +174,7 @@ class MediaLibrary {
   ///
   /// [created] and [location] come from the sender's library. They matter
   /// for files that carry no metadata of their own, such as WhatsApp images.
+  @override
   Future<String> save(
     File file, {
     required String name,

@@ -2,12 +2,12 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 import 'client.dart';
 import 'discovery.dart';
 import 'file_store.dart';
+import 'folder_library.dart';
 import 'ledger.dart';
 import 'media_library.dart';
 import 'protocol.dart';
@@ -25,6 +25,9 @@ enum EngineMode {
 
   /// A short iOS background task: send new photos, then stop.
   iosBackground,
+
+  /// The Mac app. Always on while it runs, window or not.
+  desktop,
 }
 
 /// Optional callbacks a host uses to mirror sync progress elsewhere (the
@@ -65,8 +68,11 @@ class SyncEngine {
   /// Local asset ids created by receiving; never sent back.
   final IdLedger _imported;
 
-  final MediaLibrary _library = MediaLibrary();
-  final FileStore _files = FileStore();
+  late final PhotoSource _library = Platform.isMacOS
+      ? FolderLibrary(() => settings.photosFolder)
+      : MediaLibrary();
+  late final FileStore _files = FileStore(macRoot: () => settings.filesFolder);
+  StreamSubscription<void>? _folderWatch;
   late final PeerClient _client;
   ReceiveServer? _server;
   late final LanDiscovery _discovery;
@@ -75,7 +81,9 @@ class SyncEngine {
   void Function()? onChange;
 
   bool hasPhotoAccess = false;
-  Peer? peer;
+
+  /// Connected (paired and reachable) devices by id.
+  Map<String, Peer> peers = {};
   Map<String, Map<String, dynamic>> _devices = {};
 
   /// Every address that answered the last probe → whether it's paired.
@@ -101,12 +109,18 @@ class SyncEngine {
   Timer? _changeDebounce;
   Timer? _emitTimer;
 
-  String get os => Platform.isIOS ? 'ios' : 'android';
+  String get os => Platform.isIOS
+      ? 'ios'
+      : Platform.isMacOS
+      ? 'macos'
+      : 'android';
   int get port => _server?.port ?? 0;
 
   bool get _autoAllowed =>
       settings.autoSend &&
-      (mode == EngineMode.androidService || appInForeground);
+      (mode == EngineMode.androidService ||
+          mode == EngineMode.desktop ||
+          appInForeground);
 
   static Future<SyncEngine> create(
     EngineMode mode, {
@@ -147,8 +161,10 @@ class SyncEngine {
         'id': settings.deviceId,
         'name': settings.deviceName,
         'os': os,
+        'inbound': settings.inbound,
       },
       currentKey: () => settings.syncKey,
+      acceptsPhotos: () => settings.inbound,
       alreadyHave: (sender, asset) => _received.contains('$sender|$asset'),
       onFile: _onIncoming,
     );
@@ -157,14 +173,20 @@ class SyncEngine {
     await _startDiscovery();
     _discovery.changes.listen((_) => _probe());
 
-    PhotoManager.addChangeCallback(_onLibraryChanged);
-    await PhotoManager.startChangeNotify();
+    if (Platform.isMacOS) {
+      _watchFolder();
+    } else {
+      PhotoManager.addChangeCallback(_onLibraryChanged);
+      await PhotoManager.startChangeNotify();
+    }
 
     _probeTimer = Timer.periodic(const Duration(seconds: 8), (_) => _probe());
     unawaited(_probe());
   }
 
   Future<bool> _checkPhotoAccess() async {
+    // The Mac sends a folder, not the Photos library.
+    if (Platform.isMacOS) return true;
     try {
       if (mode == EngineMode.androidService) {
         // Permission APIs need an Activity, which a service doesn't have.
@@ -200,15 +222,17 @@ class SyncEngine {
     return {
       'settings': settings.toJson(),
       'hasPhotoAccess': hasPhotoAccess,
-      'peer': peer == null
-          ? null
-          : {
-              'id': peer!.info.id,
-              'name': peer!.info.name,
-              'os': peer!.info.os,
-              'address': peer!.address,
-              'via': _routeLabel(peer!),
-            },
+      'peers': [
+        for (final p in peers.values)
+          {
+            'id': p.info.id,
+            'name': p.info.name,
+            'os': p.info.os,
+            'address': p.address,
+            'via': _routeLabel(p),
+            'inbound': p.info.inbound,
+          },
+      ],
       'devices': [
         for (final d in devices.values)
           {...d, 'saved': saved.contains(d['address'])},
@@ -288,7 +312,7 @@ class SyncEngine {
           unawaited(syncNow(assetIds: ids));
         case 'sendFiles':
           unawaited(
-            sendFiles([
+            sendFiles(to: (cmd['to'] as List?)?.cast<String>(), [
               for (final f in cmd['files'] as List)
                 (
                   path: (f as Map)['path'] as String,
@@ -308,12 +332,12 @@ class SyncEngine {
           final code = normalizePairingCode(cmd['code'] as String);
           if (code.length < 6) throw ArgumentError('Code is too short');
           await settings.setSyncKey(code);
-          peer = null;
+          peers = {};
           _addLog('info', 'Pairing code updated');
           await _probe();
         case 'newPairingCode':
           await settings.setSyncKey(generatePairingCode());
-          peer = null;
+          peers = {};
           await _probe();
         case 'setDeviceName':
           final name = (cmd['name'] as String).trim();
@@ -335,6 +359,7 @@ class SyncEngine {
           unawaited(_probe());
         case 'setToggle':
           await settings.setToggle(cmd['key'] as String, cmd['value'] as bool);
+          // Others learn about inbound from /info on their next probe.
           if (cmd['key'] == 'autoSend' && cmd['value'] == true) {
             unawaited(_autoSync());
           }
@@ -343,6 +368,12 @@ class SyncEngine {
             DateTime.fromMillisecondsSinceEpoch(cmd['ms'] as int),
           );
           unawaited(_autoSync());
+        case 'setFolder':
+          await settings.setFolder(cmd['key'] as String, cmd['path'] as String);
+          if (cmd['key'] == 'photosFolder') {
+            _watchFolder();
+            unawaited(_autoSync());
+          }
         case 'resetSent':
           await _sent.clear();
           _addLog('info', 'Sent history cleared');
@@ -351,6 +382,8 @@ class SyncEngine {
           await settings.setPhotoAccess(hasPhotoAccess);
           if (hasPhotoAccess) unawaited(_autoSync());
         case 'lifecycle':
+          // The Mac keeps syncing with its window hidden or closed.
+          if (mode == EngineMode.desktop) return;
           appInForeground = cmd['foreground'] == true;
           if (appInForeground) await onResumed();
       }
@@ -389,8 +422,9 @@ class SyncEngine {
 
   // ---------------------------------------------------------------- peers
 
-  /// Probes every known address at once and picks the first paired device,
-  /// preferring Wi-Fi discovery, then saved addresses, then the last one.
+  /// Probes every known address at once and keeps every paired device, each
+  /// at the first address that answered (Wi-Fi discovery, then saved
+  /// addresses, then the last ones that worked).
   Future<void> _probe() async {
     if (_probing) return;
     _probing = true;
@@ -399,14 +433,14 @@ class SyncEngine {
         for (final d in _discovery.devices) (d.host, d.port),
         for (final p in settings.savedPeers) ?parseAddress(p.address),
         ?parseAddress(settings.lastPeer),
-        if (peer case final p?) (p.host, p.port),
+        for (final p in peers.values) (p.host, p.port),
       }.toList();
 
       final results = await Future.wait(
         candidates.map((c) => _client.probe(c.$1, c.$2)),
       );
 
-      Peer? found;
+      final found = <String, Peer>{};
       final devices = <String, Map<String, dynamic>>{};
       final reachable = <String, bool>{};
       for (var i = 0; i < candidates.length; i++) {
@@ -414,30 +448,47 @@ class SyncEngine {
         if (info == null || info.id == settings.deviceId) continue;
         final (host, p) = candidates[i];
         final candidate = Peer(info, host, p);
-        found ??= info.paired ? candidate : null;
+        if (info.paired) found.putIfAbsent(info.id, () => candidate);
         devices.putIfAbsent(info.id, () => _deviceJson(candidate));
         reachable[candidate.address] = info.paired;
       }
 
-      final wasOnline = peer != null;
+      final joined = [
+        for (final p in found.values)
+          if (!peers.containsKey(p.info.id)) p,
+      ];
+      final left = [
+        for (final p in peers.values)
+          if (!found.containsKey(p.info.id)) p,
+      ];
       final changed =
-          found?.address != peer?.address ||
+          joined.isNotEmpty ||
+          left.isNotEmpty ||
+          [
+                for (final p in found.values)
+                  (p.address, p.info.inbound, p.info.name),
+              ].join() !=
+              [
+                for (final p in peers.values)
+                  (p.address, p.info.inbound, p.info.name),
+              ].join() ||
           devices.length != _devices.length ||
           reachable.length != _reachable.length;
-      peer = found;
+      peers = found;
       _devices = devices;
       _reachable = reachable;
-      if (found != null) {
-        if (settings.lastPeer != found.address) {
-          await settings.setLastPeer(found.address);
+      if (found.values.firstOrNull case final first?) {
+        if (settings.lastPeer != first.address) {
+          await settings.setLastPeer(first.address);
         }
-        if (!wasOnline) {
-          _addLog('info', 'Connected to ${found.info.name}');
-          unawaited(_autoSync());
-        }
-      } else if (wasOnline) {
-        _addLog('info', 'Other phone went offline');
       }
+      for (final p in joined) {
+        _addLog('info', 'Connected to ${p.info.name}');
+      }
+      for (final p in left) {
+        _addLog('info', '${p.info.name} went offline');
+      }
+      if (joined.isNotEmpty) unawaited(_autoSync());
       if (changed) _changed();
     } finally {
       _probing = false;
@@ -485,29 +536,57 @@ class SyncEngine {
   }
 
   Future<void> _autoSync() async {
-    if (_autoAllowed && peer != null) await syncNow();
+    if (_autoAllowed && peers.isNotEmpty) await syncNow();
   }
 
-  void _onLibraryChanged(MethodCall _) {
+  void _onLibraryChanged([Object? _]) {
     if (!_autoAllowed) return;
     // Bursts of changes (e.g. saving 50 photos from WhatsApp) → one sync.
     _changeDebounce?.cancel();
     _changeDebounce = Timer(const Duration(seconds: 3), _autoSync);
   }
 
+  /// Mac: follow the photos folder (again, when it's changed in Settings).
+  void _watchFolder() {
+    _folderWatch?.cancel();
+    final library = _library;
+    if (library is! FolderLibrary) return;
+    try {
+      _folderWatch = library.watch().listen(
+        _onLibraryChanged,
+        onError: (Object e) => _addLog('error', 'Watching folder: $e'),
+      );
+    } catch (e) {
+      _addLog('error', 'Watching folder: $e');
+    }
+  }
+
   // ---------------------------------------------------------------- sending
 
-  /// Sends everything new since [AppSettings.syncSince], or exactly
-  /// [assetIds] when given (manual pick; re-sends even if sent before).
-  /// Stops early at [deadline] (background tasks have little time).
+  /// Devices that accept photos right now.
+  List<Peer> get _photoTargets => [
+    for (final p in peers.values)
+      if (p.info.inbound) p,
+  ];
+
+  /// Sends everything new since [AppSettings.syncSince] (the Mac: everything
+  /// in its photos folder) to every connected device that accepts photos,
+  /// or exactly [assetIds] when given (manual pick; re-sends even if sent
+  /// before). Stops early at [deadline] (background tasks have little time).
   Future<int> syncNow({List<String>? assetIds, DateTime? deadline}) async {
     if (syncing) {
       if (assetIds == null) _syncAgain = true;
       return 0;
     }
-    final target = peer;
-    if (target == null) {
-      _addLog('error', 'Other phone not found yet');
+    if (peers.isEmpty) {
+      _addLog('error', 'No other device found yet');
+      return 0;
+    }
+    final targets = _photoTargets;
+    if (targets.isEmpty) {
+      if (assetIds != null) {
+        _addLog('error', 'Connected devices have inbound turned off');
+      }
       return 0;
     }
     if (!hasPhotoAccess) {
@@ -518,47 +597,68 @@ class SyncEngine {
     syncing = true;
     _cancel = false;
     _changed();
+    final sentTo = <String, int>{};
     var sentNow = 0;
     try {
       final manual = assetIds != null;
-      final List<AssetEntity> candidates;
-      if (manual) {
-        candidates = [for (final id in assetIds) ?await AssetEntity.fromId(id)];
-      } else {
-        candidates = await _library.assetsSince(
-          settings.syncSince,
-          includeVideos: settings.includeVideos,
-        );
-      }
-      final queue = candidates
-          .where(
-            (a) =>
-                manual ||
-                (!_imported.contains(a.id) &&
-                    !_sent.contains('${target.info.id}|${a.id}')),
-          )
-          .toList();
+      final candidates = manual
+          ? await _library.byIds(assetIds)
+          : await _library.pending(
+              since: settings.syncSince,
+              includeVideos: settings.includeVideos,
+            );
+      bool needs(Peer t, SourceItem a) =>
+          manual || !_sent.contains('${t.info.id}|${a.id}');
+      final queue = [
+        for (final a in candidates)
+          if (manual || !_imported.contains(a.id))
+            if (targets.any((t) => needs(t, a))) a,
+      ];
       if (queue.isEmpty) return 0;
 
-      _addLog('info', 'Sending ${queue.length} to ${target.info.name}');
+      _addLog(
+        'info',
+        'Sending ${queue.length} to '
+            '${targets.map((t) => t.info.name).join(', ')}',
+      );
       hooks.onSyncStart?.call(queue.length);
-      for (var i = 0; i < queue.length && !_cancel; i++) {
+      // Targets drop out of this run when they fail (offline, wrong code).
+      final active = [...targets];
+      for (var i = 0; i < queue.length && !_cancel && active.isNotEmpty; i++) {
         if (deadline != null && DateTime.now().isAfter(deadline)) {
           _addLog('info', 'Out of background time, will continue later');
           break;
         }
-        final asset = queue[i];
-        _setProgress(i, queue.length, asset.title ?? 'item ${i + 1}', 0);
-        hooks.onProgress?.call(i, queue.length, asset.title ?? '');
-        try {
-          if (await _sendOne(target, asset, i, queue.length)) sentNow++;
-        } on Exception catch (e) {
-          if (_stopAfter(e)) break;
+        final item = queue[i];
+        _setProgress(i, queue.length, item.title, 0);
+        hooks.onProgress?.call(i, queue.length, item.title);
+        // Exported once, then uploaded to each device that needs it.
+        ExportedAsset? exported;
+        for (final t in [...active]) {
+          if (!needs(t, item)) continue;
+          try {
+            final sent = await _sendOne(
+              t,
+              item,
+              () async => exported ??= await item.export(),
+              i,
+              queue.length,
+            );
+            if (sent) {
+              sentNow++;
+              sentTo.update(t.info.name, (n) => n + 1, ifAbsent: () => 1);
+            }
+          } on Exception catch (e) {
+            if (_stopAfter(e, t)) active.remove(t);
+          }
         }
         if (i % 10 == 9) await _library.releaseExports();
       }
-      if (sentNow > 0) {
-        _addLog('sent', 'Sent $sentNow to ${target.info.name}');
+      if (sentTo.isNotEmpty) {
+        _addLog(
+          'sent',
+          'Sent ${[for (final e in sentTo.entries) '${e.value} to ${e.key}'].join(', ')}',
+        );
       }
       if (_cancel) _addLog('info', 'Stopped');
     } catch (e) {
@@ -577,40 +677,47 @@ class SyncEngine {
     return sentNow;
   }
 
-  /// Logs a failed transfer. Returns true when the rest of the batch
-  /// should stop (wrong pairing code, network gone); rethrows the unknown.
-  bool _stopAfter(Exception e) {
+  /// Logs a failed transfer to [target]. Returns true when the rest of the
+  /// batch should skip it (wrong pairing code, inbound off, network gone);
+  /// rethrows the unknown.
+  bool _stopAfter(Exception e, Peer target) {
+    final name = target.info.name;
     switch (e) {
       case TransferException():
-        _addLog('error', e.message);
-        return e.unauthorized;
+        _addLog('error', '$name: ${e.message}');
+        return e.unauthorized || e.rejected;
       case IOException():
-        // Network dropped: stop, the next probe/sync resumes from here.
-        _addLog('error', 'Connection lost: ${e.runtimeType}');
-        peer = null;
+        // Network dropped: skip it, the next probe/sync resumes from here.
+        _addLog('error', 'Lost $name: ${e.runtimeType}');
+        peers.remove(target.info.id);
         return true;
       case TimeoutException():
-        _addLog('error', 'Timed out, will retry later');
-        peer = null;
+        _addLog('error', '$name timed out, will retry later');
+        peers.remove(target.info.id);
         return true;
     }
     throw e;
   }
 
-  /// Sends files the user picked (not photos) to the connected phone. Each
-  /// lands in the receiver's files folder under its [dir], so a picked
-  /// folder arrives with its structure intact.
+  /// Sends files the user picked (not photos) to the devices with ids in
+  /// [to], or all connected ones. Each lands in the receiver's files folder
+  /// under its [dir], so a picked folder arrives with its structure intact.
+  /// Inbound doesn't apply: files are always sent on purpose.
   Future<int> sendFiles(
-    List<({String path, String name, String dir})> files,
-  ) async {
+    List<({String path, String name, String dir})> files, {
+    List<String>? to,
+  }) async {
     if (files.isEmpty) return 0;
     if (syncing) {
       _addLog('error', 'Wait for the current transfer to finish');
       return 0;
     }
-    final target = peer;
-    if (target == null) {
-      _addLog('error', 'Other phone not found yet');
+    final targets = [
+      for (final p in peers.values)
+        if (to == null || to.contains(p.info.id)) p,
+    ];
+    if (targets.isEmpty) {
+      _addLog('error', 'No other device found yet');
       return 0;
     }
 
@@ -620,12 +727,11 @@ class SyncEngine {
     var sentNow = 0;
     final batch = _now();
     try {
-      _addLog(
-        'info',
-        'Sending ${_countFiles(files.length)} to ${target.info.name}',
-      );
+      final names = targets.map((t) => t.info.name).join(', ');
+      _addLog('info', 'Sending ${_countFiles(files.length)} to $names');
       hooks.onSyncStart?.call(files.length);
-      for (var i = 0; i < files.length && !_cancel; i++) {
+      final active = [...targets];
+      for (var i = 0; i < files.length && !_cancel && active.isNotEmpty; i++) {
         final f = files[i];
         _setProgress(i, files.length, f.name, 0);
         hooks.onProgress?.call(i, files.length, f.name);
@@ -634,36 +740,40 @@ class SyncEngine {
           _addLog('error', 'Could not read ${f.name}');
           continue;
         }
-        var lastNotify = 0;
-        try {
-          await _client.upload(
-            target,
-            // Unique per send: picking the same file again sends it again.
-            assetId: 'file:$batch:$i',
-            file: file,
-            name: f.name,
-            kind: 'file',
-            dir: f.dir,
-            created: await file.lastModified(),
-            onProgress: (sent, total) {
-              final now = _now();
-              if (now - lastNotify < 150) return;
-              lastNotify = now;
-              _setProgress(
-                i,
-                files.length,
-                f.name,
-                total == 0 ? 1 : sent / total,
-              );
-            },
-          );
-          sentNow++;
-        } on Exception catch (e) {
-          if (_stopAfter(e)) break;
+        var delivered = false;
+        for (final t in [...active]) {
+          var lastNotify = 0;
+          try {
+            await _client.upload(
+              t,
+              // Unique per send: picking the same file again sends it again.
+              assetId: 'file:$batch:$i',
+              file: file,
+              name: f.name,
+              kind: 'file',
+              dir: f.dir,
+              created: await file.lastModified(),
+              onProgress: (sent, total) {
+                final now = _now();
+                if (now - lastNotify < 150) return;
+                lastNotify = now;
+                _setProgress(
+                  i,
+                  files.length,
+                  f.name,
+                  total == 0 ? 1 : sent / total,
+                );
+              },
+            );
+            delivered = true;
+          } on Exception catch (e) {
+            if (_stopAfter(e, t)) active.remove(t);
+          }
         }
+        if (delivered) sentNow++;
       }
       if (sentNow > 0) {
-        _addLog('sent', 'Sent ${_countFiles(sentNow)} to ${target.info.name}');
+        _addLog('sent', 'Sent ${_countFiles(sentNow)} to $names');
       }
       if (_cancel) _addLog('info', 'Stopped');
     } catch (e) {
@@ -684,34 +794,33 @@ class SyncEngine {
     _changed();
   }
 
-  /// Photos says 0,0 when an asset has no location.
-  static (double, double)? _locationOf(AssetEntity asset) {
-    final lat = asset.latitude, lng = asset.longitude;
-    if (lat == null || lng == null || (lat == 0 && lng == 0)) return null;
-    return (lat, lng);
-  }
-
   /// Returns true when a file was actually transferred.
-  Future<bool> _sendOne(Peer target, AssetEntity asset, int i, int n) async {
-    final ledgerKey = '${target.info.id}|${asset.id}';
-    if (await _client.has(target, asset.id)) {
+  Future<bool> _sendOne(
+    Peer target,
+    SourceItem item,
+    Future<ExportedAsset?> Function() export,
+    int i,
+    int n,
+  ) async {
+    final ledgerKey = '${target.info.id}|${item.id}';
+    if (await _client.has(target, item.id)) {
       await _sent.add(ledgerKey);
       return false;
     }
-    final exported = await _library.export(asset);
+    final exported = await export();
     if (exported == null) {
-      _addLog('error', 'Could not read ${asset.title ?? asset.id}');
+      _addLog('error', 'Could not read ${item.title}');
       return false;
     }
     var lastNotify = 0;
     final status = await _client.upload(
       target,
-      assetId: asset.id,
+      assetId: item.id,
       file: exported.file,
       name: exported.name,
       kind: exported.kind,
-      created: asset.createDateTime,
-      location: _locationOf(asset),
+      created: item.created,
+      location: item.location,
       onProgress: (sent, total) {
         final now = _now();
         if (now - lastNotify < 150) return;
@@ -724,15 +833,15 @@ class SyncEngine {
     return status == 'saved';
   }
 
-  /// Entry point for iOS background tasks: find the peer, send what's new
-  /// within [budget], and return how many photos went out.
+  /// Entry point for iOS background tasks: find the devices, send what's
+  /// new within [budget], and return how many photos went out.
   Future<int> runBackgroundSync(Duration budget) async {
     final deadline = DateTime.now().add(budget);
     if (!settings.backgroundSync || !settings.autoSend) return 0;
     // Give Bonjour a moment; saved and last-known addresses work anyway.
     await Future<void>.delayed(const Duration(seconds: 2));
     await _probe();
-    if (peer == null) return 0;
+    if (peers.isEmpty) return 0;
     return syncNow(deadline: deadline);
   }
 
@@ -763,6 +872,7 @@ class SyncEngine {
   Future<void> dispose() async {
     _probeTimer?.cancel();
     _changeDebounce?.cancel();
+    await _folderWatch?.cancel();
     _emitTimer?.cancel();
     onChange = null;
     await _discovery.stop();

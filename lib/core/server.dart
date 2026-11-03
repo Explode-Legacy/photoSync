@@ -41,8 +41,14 @@ class ReceiveServer {
     required this.currentKey,
     required this.alreadyHave,
     required this.onFile,
+    this.acceptsPhotos = _always,
     this.tempRoot,
   });
+
+  static bool _always() => true;
+
+  /// False rejects photos and videos (the "Allow inbound" setting).
+  final bool Function() acceptsPhotos;
 
   /// Where uploads are staged; defaults to the app's temp directory.
   final Directory? tempRoot;
@@ -145,6 +151,10 @@ class ReceiveServer {
       fallback: kind == 'file' ? 'file' : 'photo.jpg',
     );
     final folder = safeDir(Uri.decodeComponent(h.value(Hdr.dir) ?? ''));
+    if (kind != 'file' && !acceptsPhotos()) {
+      await req.drain<void>();
+      return _json(req, 403, {'error': 'inbound'});
+    }
     final createdMs = int.tryParse(h.value(Hdr.created) ?? '');
     final lat = double.tryParse(h.value(Hdr.lat) ?? '');
     final lng = double.tryParse(h.value(Hdr.lng) ?? '');

@@ -33,6 +33,7 @@ class PeerInfo {
     required this.name,
     required this.os,
     required this.paired,
+    this.inbound = true,
   });
 
   factory PeerInfo.fromJson(Map<String, dynamic> j) => PeerInfo(
@@ -40,6 +41,7 @@ class PeerInfo {
     name: j['name'] as String? ?? 'Unknown',
     os: j['os'] as String? ?? '',
     paired: j['paired'] as bool? ?? false,
+    inbound: j['inbound'] as bool? ?? true,
   );
 
   final String id;
@@ -48,6 +50,10 @@ class PeerInfo {
 
   /// True when the caller sent the right pairing code.
   final bool paired;
+
+  /// Whether it accepts photos (its "Allow inbound" setting). Files are
+  /// always accepted.
+  final bool inbound;
 }
 
 /// A device we can talk to, with the address that worked.

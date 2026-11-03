@@ -98,36 +98,45 @@ class FileSender {
     String? folder,
   ) async {
     if (files.isEmpty) return;
-    final to = client.state?.peer?['name'] ?? 'the other phone';
     final total = files.fold<int>(0, (sum, f) => sum + f.size);
     final what = folder != null
         ? 'the folder "$folder" (${_count(files.length)}, ${_size(total)})'
         : files.length == 1
         ? '"${files.first.name}" (${_size(total)})'
         : '${_count(files.length)} (${_size(total)})';
-    final ok = await showDialog<bool>(
+    final to = await showDialog<List<String>>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Send files?'),
-        content: Text('Send $what to $to?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Send'),
-          ),
-        ],
-      ),
+      builder: (_) => _SendDialog(client: client, what: what),
     );
-    if (ok != true) return;
+    if (to == null || to.isEmpty) return;
     client.send('sendFiles', {
+      'to': to,
       'files': [
         for (final f in files) {'path': f.path, 'name': f.name, 'dir': f.dir},
       ],
     });
+  }
+
+  /// Files handed over by the share sheet, Open With or a Dock drop. A
+  /// shared folder (Mac) goes with its structure, like "Folder…".
+  Future<void> sendShared(BuildContext context, List<String> paths) async {
+    final files = <PickedFile>[];
+    String? folder;
+    for (final path in paths) {
+      if (await FileSystemEntity.isDirectory(path)) {
+        final inside = await _listFolder(path);
+        files.addAll(inside);
+        folder = paths.length == 1 ? path.split('/').last : null;
+      } else if (await File(path).exists()) {
+        files.add((
+          path: path,
+          name: path.split('/').last,
+          dir: '',
+          size: await File(path).length(),
+        ));
+      }
+    }
+    if (context.mounted) await _confirmAndSend(context, files, folder);
   }
 
   static void _snack(BuildContext context, String text) =>
@@ -149,7 +158,85 @@ class FileSender {
 
 class _AccessDenied implements Exception {}
 
-/// Home-screen card: send files or a folder to the connected phone.
+/// "Send … to:" with a checkbox per connected device, all ticked at first.
+/// Pops the chosen device ids.
+class _SendDialog extends StatefulWidget {
+  const _SendDialog({required this.client, required this.what});
+
+  final SyncClient client;
+  final String what;
+
+  @override
+  State<_SendDialog> createState() => _SendDialogState();
+}
+
+class _SendDialogState extends State<_SendDialog> {
+  /// Unticked device ids; new devices that connect meanwhile start ticked.
+  final _off = <String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.client,
+      builder: (context, _) {
+        final peers = widget.client.state?.peers ?? [];
+        final chosen = [
+          for (final p in peers)
+            if (!_off.contains(p['id'])) p['id'] as String,
+        ];
+        return AlertDialog(
+          title: const Text('Send files'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Send ${widget.what} to:'),
+              const SizedBox(height: 8),
+              if (peers.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Text(
+                    'No devices connected. Open PhotoBridge on '
+                    'the other device.',
+                  ),
+                ),
+              for (final p in peers)
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: Icon(switch (p['os']) {
+                    'ios' => Icons.phone_iphone,
+                    'macos' => Icons.laptop_mac,
+                    _ => Icons.phone_android,
+                  }),
+                  title: Text(p['name'] as String),
+                  subtitle: Text('via ${p['via']}'),
+                  value: !_off.contains(p['id']),
+                  onChanged: (v) => setState(() {
+                    final id = p['id'] as String;
+                    v == true ? _off.remove(id) : _off.add(id);
+                  }),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: chosen.isEmpty
+                  ? null
+                  : () => Navigator.pop(context, chosen),
+              child: const Text('Send'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// Home-screen card: send files or a folder to connected devices.
 class SendFilesCard extends StatelessWidget {
   const SendFilesCard({super.key, required this.state, required this.client});
 
@@ -159,7 +246,8 @@ class SendFilesCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final sender = FileSender(client);
-    final enabled = state.peer != null && !state.syncing;
+    final enabled = state.peers.isNotEmpty && !state.syncing;
+    final location = Platform.isMacOS ? state.filesFolder : FileStore.location;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -170,7 +258,7 @@ class SendFilesCard extends StatelessWidget {
             const SizedBox(height: 4),
             Text(
               'Any file or folder, sent once. Files you receive are in '
-              '${FileStore.location}.',
+              '$location.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 16),

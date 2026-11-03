@@ -43,7 +43,12 @@ class AppSettings {
   String get deviceId => _p.getString('deviceId')!;
 
   String get deviceName =>
-      _p.getString('deviceName') ?? (Platform.isIOS ? 'iPhone' : 'Android');
+      _p.getString('deviceName') ??
+      (Platform.isIOS
+          ? 'iPhone'
+          : Platform.isMacOS
+          ? 'Mac'
+          : 'Android');
   Future<void> setDeviceName(String v) => _p.setString('deviceName', v.trim());
 
   /// Shared secret. Both phones must hold the same value to talk.
@@ -64,9 +69,10 @@ class AppSettings {
   String get lastPeer => _p.getString('lastPeer') ?? '';
   Future<void> setLastPeer(String v) => _p.setString('lastPeer', v);
 
-  /// Send new photos automatically. On by default only on iPhone, since
-  /// iPhone → Android is the main direction.
-  bool get autoSend => _p.getBool('autoSend') ?? Platform.isIOS;
+  /// Send new photos automatically. On by default on iPhone (iPhone →
+  /// Android is the main direction) and the Mac (its photos folder).
+  bool get autoSend =>
+      _p.getBool('autoSend') ?? (Platform.isIOS || Platform.isMacOS);
   Future<void> setAutoSend(bool v) => _p.setBool('autoSend', v);
 
   bool get includeVideos => _p.getBool('includeVideos') ?? true;
@@ -87,8 +93,36 @@ class AppSettings {
   bool get photoAccess => _p.getBool('photoAccess') ?? false;
   Future<void> setPhotoAccess(bool v) => _p.setBool('photoAccess', v);
 
+  /// Accept photos other devices send. Off by default on the Mac, so the
+  /// phones' libraries don't pour into the laptop. Files sent with "Send
+  /// files" are always accepted.
+  bool get inbound => _p.getBool('inbound') ?? !Platform.isMacOS;
+
+  /// Mac only: photos in this folder are sent to the phones, and photos
+  /// received (when [inbound] is on) are saved here.
+  String get photosFolder =>
+      _p.getString('photosFolder') ?? '$_home/Pictures/PhotoBridge';
+
+  /// Mac only: where files from "Send files" are saved.
+  String get filesFolder =>
+      _p.getString('filesFolder') ?? '$_home/Downloads/PhotoBridge';
+
+  static String get _home => Platform.environment['HOME'] ?? '';
+
+  static const folders = {'photosFolder', 'filesFolder'};
+
+  Future<void> setFolder(String key, String path) {
+    if (!folders.contains(key)) throw ArgumentError('Unknown folder $key');
+    return _p.setString(key, path);
+  }
+
   /// Simple toggles the UI may change by name.
-  static const toggles = {'autoSend', 'includeVideos', 'backgroundSync'};
+  static const toggles = {
+    'autoSend',
+    'includeVideos',
+    'backgroundSync',
+    'inbound',
+  };
 
   Future<void> setToggle(String key, bool v) {
     if (!toggles.contains(key)) throw ArgumentError('Unknown setting $key');
@@ -104,6 +138,11 @@ class AppSettings {
     'includeVideos': includeVideos,
     'syncSince': syncSince.millisecondsSinceEpoch,
     'backgroundSync': backgroundSync,
+    'inbound': inbound,
+    if (Platform.isMacOS) ...{
+      'photosFolder': photosFolder,
+      'filesFolder': filesFolder,
+    },
   };
 }
 

@@ -5,10 +5,17 @@ import 'dart:io';
 import 'protocol.dart';
 
 class TransferException implements Exception {
-  TransferException(this.message, {this.unauthorized = false});
+  TransferException(
+    this.message, {
+    this.unauthorized = false,
+    this.rejected = false,
+  });
 
   final String message;
   final bool unauthorized;
+
+  /// The receiver turned off inbound photos.
+  final bool rejected;
 
   @override
   String toString() => message;
@@ -118,6 +125,9 @@ class PeerClient {
     if (status == 200) return;
     if (status == 401) {
       throw TransferException('Pairing code mismatch', unauthorized: true);
+    }
+    if (status == 403) {
+      throw TransferException('Inbound is off there', rejected: true);
     }
     var msg = 'HTTP $status';
     try {

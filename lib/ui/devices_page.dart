@@ -42,7 +42,7 @@ class _DevicesPageState extends State<DevicesPage> {
       builder: (context, _) {
         final s = c.state;
         if (s == null) return const Scaffold();
-        final peerAddress = s.peer?['address'];
+        final connected = {for (final p in s.peers) p['address']};
         final reachable = s.reachable;
         final saved = s.savedPeers;
         final savedAddrs = {for (final p in saved) p.address};
@@ -81,7 +81,7 @@ class _DevicesPageState extends State<DevicesPage> {
                 _savedTile(
                   p,
                   online: reachable[_canonical(p.address)],
-                  connected: _canonical(p.address) == peerAddress,
+                  connected: connected.contains(_canonical(p.address)),
                 ),
               _Section(
                 'On this network',
@@ -103,10 +103,11 @@ class _DevicesPageState extends State<DevicesPage> {
                     s.scanning ? 'Scanning…' : 'No other PhotoBridge found',
                   ),
                   subtitle: const Text(
-                    'Open PhotoBridge on the other phone, on the same Wi-Fi.',
+                    'Open PhotoBridge on the other device, on the same Wi-Fi.',
                   ),
                 ),
-              for (final d in found) _foundTile(d, d['address'] == peerAddress),
+              for (final d in found)
+                _foundTile(d, connected.contains(d['address'])),
             ],
           ),
         );
@@ -150,10 +151,11 @@ class _DevicesPageState extends State<DevicesPage> {
   Widget _foundTile(Map<String, dynamic> d, bool connected) {
     final paired = d['paired'] == true;
     return ListTile(
-      leading: Icon(
-        d['os'] == 'ios' ? Icons.phone_iphone : Icons.phone_android,
-        color: connected ? Colors.green : null,
-      ),
+      leading: Icon(switch (d['os']) {
+        'ios' => Icons.phone_iphone,
+        'macos' => Icons.laptop_mac,
+        _ => Icons.phone_android,
+      }, color: connected ? Colors.green : null),
       title: Text(d['name'] as String),
       subtitle: Text(
         '${d['address']} · ${connected

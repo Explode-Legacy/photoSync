@@ -7,7 +7,7 @@ import workmanager_apple
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let continued = ContinuedSync()
-  private let folderPicker = FolderPicker()
+  private let files = FilesBridge()
 
   override func application(
     _ application: UIApplication,
@@ -34,7 +34,9 @@ import workmanager_apple
       continued.attach(messenger: registrar.messenger())
     }
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "PhotoBridgeFiles") {
-      folderPicker.attach(messenger: registrar.messenger())
+      files.attach(messenger: registrar.messenger())
+      // Delivers files from the share sheet ("Open in PhotoBridge").
+      registrar.addSceneDelegate(files)
     }
   }
 }
@@ -147,22 +149,92 @@ final class ContinuedSync {
   }
 }
 
-/// Folder picker for "Send files → Folder…".
+/// "Send files" support: a folder picker, and files shared to PhotoBridge.
 ///
-/// file_picker returns a picked folder's path without opening access to it,
-/// so files in iCloud Drive or other apps' folders can't be read. This keeps
-/// the security-scoped access open until the next pick.
-final class FolderPicker: NSObject, UIDocumentPickerDelegate {
+/// Folder picker: file_picker returns a picked folder's path without opening
+/// access to it, so files in iCloud Drive or other apps' folders can't be
+/// read. This keeps the security-scoped access open until the next pick.
+///
+/// Sharing: PhotoBridge accepts any file type (CFBundleDocumentTypes), so
+/// it shows in the share sheet. Shared files are copied to tmp and handed to
+/// Dart on request (`takeShared`), so none are lost while Flutter starts.
+final class FilesBridge: NSObject, UIDocumentPickerDelegate, FlutterSceneLifeCycleDelegate {
+  private var channel: FlutterMethodChannel?
   private var pending: FlutterResult?
   private var current: URL?
+  private var shared: [String] = []
 
   func attach(messenger: FlutterBinaryMessenger) {
     let channel = FlutterMethodChannel(name: "photobridge/files", binaryMessenger: messenger)
     channel.setMethodCallHandler { [weak self] call, result in
-      guard let self, call.method == "pickFolder" else { return result(FlutterMethodNotImplemented) }
-      self.present(result)
+      guard let self else { return result(nil) }
+      switch call.method {
+      case "pickFolder":
+        self.present(result)
+      case "takeShared":
+        result(self.shared + self.collectInbox())
+        self.shared = []
+      default:
+        result(FlutterMethodNotImplemented)
+      }
     }
+    self.channel = channel
   }
+
+  // MARK: Sharing
+
+  func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions?
+  ) -> Bool {
+    if let contexts = connectionOptions?.urlContexts { receive(contexts.map(\.url)) }
+    return false
+  }
+
+  func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) -> Bool {
+    receive(URLContexts.map(\.url))
+    return true
+  }
+
+  private func receive(_ urls: [URL]) {
+    let copied = urls.filter(\.isFileURL).compactMap(Self.copyToTemp)
+    guard !copied.isEmpty else { return }
+    shared += copied
+    channel?.invokeMethod("sharedAvailable", arguments: nil)
+  }
+
+  /// Files iOS dropped into Documents/Inbox (when it copies rather than
+  /// opening in place), e.g. from a share made while the app was closed.
+  private func collectInbox() -> [String] {
+    guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+    else { return [] }
+    let inbox = docs.appendingPathComponent("Inbox")
+    let items = (try? FileManager.default.contentsOfDirectory(
+      at: inbox, includingPropertiesForKeys: nil)) ?? []
+    let copied = items.compactMap(Self.copyToTemp)
+    try? FileManager.default.removeItem(at: inbox)
+    return copied
+  }
+
+  private static func copyToTemp(_ url: URL) -> String? {
+    let scoped = url.startAccessingSecurityScopedResource()
+    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+    let dir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("shared/\(UUID().uuidString)", isDirectory: true)
+    let dest = dir.appendingPathComponent(url.lastPathComponent)
+    do {
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      try FileManager.default.copyItem(at: url, to: dest)
+    } catch {
+      return nil
+    }
+    // Inbox copies would otherwise show up in Files › PhotoBridge.
+    if url.path.contains("/Documents/Inbox/") { try? FileManager.default.removeItem(at: url) }
+    return dest.path
+  }
+
+  // MARK: Folder picker
 
   private func present(_ result: @escaping FlutterResult) {
     guard pending == nil, let top = Self.topViewController() else { return result(nil) }

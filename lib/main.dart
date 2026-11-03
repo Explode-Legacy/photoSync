@@ -48,6 +48,8 @@ class _BootstrapState extends State<_Bootstrap> {
   late final Future<SyncClient> _client = _start();
 
   Future<SyncClient> _start() async {
+    // The Mac syncs a folder, not the Photos library.
+    if (Platform.isMacOS) return SyncClient.create();
     // Prompts need this (UI) isolate; the engine may live elsewhere.
     final photos = await PhotoManager.requestPermissionExtend();
     final client = await SyncClient.create();

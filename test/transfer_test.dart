@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:photobridge/core/client.dart';
+import 'package:photobridge/core/folder_library.dart';
 import 'package:photobridge/core/protocol.dart';
 import 'package:photobridge/core/scanner.dart';
 import 'package:photobridge/core/server.dart';
@@ -160,4 +161,96 @@ void main() {
     expect(ReceiveServer.safeDir(r'x\\y'), 'x/y');
     expect(ReceiveServer.safeDir(''), '');
   });
+
+  test('inbound off rejects photos but still takes files', () async {
+    final tmp = await Directory.systemTemp.createTemp('pb');
+    final got = <String>[];
+    final server = ReceiveServer(
+      selfInfo: () => {
+        'id': 'mac',
+        'name': 'Mac',
+        'os': 'macos',
+        'inbound': false,
+      },
+      currentKey: () => 'SECRET12',
+      alreadyHave: (_, _) => false,
+      acceptsPhotos: () => false,
+      onFile: (f) async => got.add(f.kind),
+      tempRoot: tmp,
+    );
+    await server.start();
+    final client = PeerClient(selfId: 'send', key: () => 'SECRET12');
+    try {
+      final info = await client.probe('127.0.0.1', server.port);
+      expect(info!.inbound, isFalse);
+      final peer = Peer(info, '127.0.0.1', server.port);
+      final src = File('${tmp.path}/a.jpg')..writeAsBytesSync([1, 2, 3]);
+      Future<String> send(String kind, String id) => client.upload(
+        peer,
+        assetId: id,
+        file: src,
+        name: 'a.jpg',
+        kind: kind,
+        created: DateTime(2026),
+      );
+      await expectLater(
+        send('image', 'P1'),
+        throwsA(
+          isA<TransferException>().having(
+            (e) => e.rejected,
+            'rejected',
+            isTrue,
+          ),
+        ),
+      );
+      expect(await send('file', 'F1'), 'saved');
+      expect(got, ['file']);
+    } finally {
+      client.close();
+      await server.stop();
+      await tmp.delete(recursive: true);
+    }
+  });
+
+  test(
+    'Mac folder library lists media and saves with the taken date',
+    () async {
+      final root = await Directory.systemTemp.createTemp('pbfolder');
+      try {
+        final lib = FolderLibrary(() => root.path);
+        File('${root.path}/b.JPG').writeAsBytesSync([1]);
+        Directory('${root.path}/Trip').createSync();
+        File('${root.path}/Trip/c.mov').writeAsBytesSync([1]);
+        File('${root.path}/notes.txt').writeAsBytesSync([1]);
+        Directory('${root.path}/.hidden').createSync();
+        File('${root.path}/.hidden/d.jpg').writeAsBytesSync([1]);
+
+        final all = await lib.pending(
+          since: DateTime(2100),
+          includeVideos: true,
+        );
+        expect(all.map((i) => i.title).toSet(), {'b.JPG', 'c.mov'});
+        final photos = await lib.pending(
+          since: DateTime(2100),
+          includeVideos: false,
+        );
+        expect(photos.map((i) => i.title), ['b.JPG']);
+
+        final incoming = File('${root.path}/../in-${root.path.hashCode}.jpg')
+          ..writeAsBytesSync([9]);
+        final taken = DateTime(2024, 5, 1, 10, 30);
+        final id = await lib.save(
+          incoming,
+          name: 'b.JPG',
+          kind: 'image',
+          created: taken,
+        );
+        expect(id, '${root.path}/b (1).JPG');
+        expect(File(id).lastModifiedSync(), taken);
+        incoming.deleteSync();
+      } finally {
+        await root.delete(recursive: true);
+      }
+    },
+  );
 }

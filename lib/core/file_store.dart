@@ -6,16 +6,24 @@ import 'package:path_provider/path_provider.dart';
 ///
 /// Android: Download/PhotoBridge, visible in any file manager. iPhone: the
 /// app's Documents folder, shown in Files → On My iPhone → PhotoBridge.
+/// Mac: the folder chosen in Settings ([macRoot]).
 class FileStore {
+  FileStore({required this.macRoot});
+
+  final String Function() macRoot;
+
   static const _androidRoot = '/storage/emulated/0/Download/PhotoBridge';
 
-  /// Human-readable location for the UI.
+  /// Human-readable location for the UI (the Mac shows its folder instead).
   static String get location => Platform.isAndroid
       ? 'Download › PhotoBridge'
       : 'Files › On My iPhone › PhotoBridge';
 
   Future<Directory> _root() async {
     if (Platform.isIOS) return getApplicationDocumentsDirectory();
+    if (Platform.isMacOS) {
+      return Directory(macRoot()).create(recursive: true);
+    }
     final root = Directory(_androidRoot);
     await root.create(recursive: true);
     // Keeps received images out of the gallery, so they aren't auto-sent

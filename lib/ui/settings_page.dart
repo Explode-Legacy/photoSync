@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../core/settings.dart';
@@ -85,8 +86,11 @@ class SettingsPage extends StatelessWidget {
                 title: const Text('Auto-send new photos'),
                 subtitle: Text(
                   Platform.isAndroid
-                      ? 'Sends to the other phone whenever it’s reachable'
-                      : 'Sends whenever the other phone is reachable and '
+                      ? 'Sends to your other devices whenever they’re reachable'
+                      : Platform.isMacOS
+                      ? 'Sends photos and videos from the photos folder below '
+                            'to every connected device that allows inbound'
+                      : 'Sends whenever your other devices are reachable and '
                             'iOS lets the app run',
                 ),
                 value: s.autoSend,
@@ -98,35 +102,82 @@ class SettingsPage extends StatelessWidget {
                 value: s.includeVideos,
                 onChanged: (v) => toggle('includeVideos', v),
               ),
-              ListTile(
-                leading: const Icon(Icons.event),
-                title: const Text('Send photos taken since'),
-                subtitle: Text(since),
-                onTap: () async {
-                  final picked = await showDatePicker(
-                    context: context,
-                    initialDate: s.syncSince,
-                    firstDate: DateTime(2000),
-                    lastDate: DateTime.now(),
-                  );
-                  if (picked != null) {
-                    c.send('setSyncSince', {
-                      'ms': picked.millisecondsSinceEpoch,
-                    });
-                  }
-                },
-              ),
+              if (Platform.isMacOS)
+                _FolderTile(
+                  icon: Icons.photo_library_outlined,
+                  title: 'Photos folder',
+                  path: s.photosFolder,
+                  hint:
+                      'Photos and videos here (and in subfolders) are sent; '
+                      'photos received with inbound on are saved here.',
+                  onPick: (path) => c.send('setFolder', {
+                    'key': 'photosFolder',
+                    'path': path,
+                  }),
+                )
+              else
+                ListTile(
+                  leading: const Icon(Icons.event),
+                  title: const Text('Send photos taken since'),
+                  subtitle: Text(since),
+                  onTap: () async {
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: s.syncSince,
+                      firstDate: DateTime(2000),
+                      lastDate: DateTime.now(),
+                    );
+                    if (picked != null) {
+                      c.send('setSyncSince', {
+                        'ms': picked.millisecondsSinceEpoch,
+                      });
+                    }
+                  },
+                ),
               ListTile(
                 leading: const Icon(Icons.history),
                 title: const Text('Forget sent history'),
                 subtitle: const Text(
-                  'Re-check everything since the date above. The other phone '
-                  'still skips photos it already has.',
+                  'Re-check everything again. Other devices still skip '
+                  'photos they already have.',
                 ),
                 onTap: () => c.send('resetSent'),
               ),
+              const _Header('Receiving'),
+              SwitchListTile(
+                secondary: const Icon(Icons.move_to_inbox_outlined),
+                title: const Text('Allow inbound photos'),
+                subtitle: Text(
+                  s.inbound
+                      ? 'Photos other devices send are saved '
+                            '${Platform.isMacOS ? 'to the photos folder' : 'to this phone'}.'
+                      : 'Other devices don’t send photos here. Files you send '
+                            'on purpose still arrive.',
+                ),
+                value: s.inbound,
+                onChanged: (v) => toggle('inbound', v),
+              ),
+              if (Platform.isMacOS)
+                _FolderTile(
+                  icon: Icons.folder_outlined,
+                  title: 'Files folder',
+                  path: s.filesFolder,
+                  hint: 'Files sent from your phones are saved here.',
+                  onPick: (path) =>
+                      c.send('setFolder', {'key': 'filesFolder', 'path': path}),
+                ),
               const _Header('Background'),
-              if (Platform.isAndroid)
+              if (Platform.isMacOS)
+                const ListTile(
+                  leading: Icon(Icons.laptop_mac),
+                  title: Text('Runs while the app is open'),
+                  subtitle: Text(
+                    'Closing the window keeps PhotoBridge running; click its '
+                    'Dock icon to bring it back. Quit it (⌘Q) to stop. '
+                    'Nothing syncs while the Mac sleeps.',
+                  ),
+                )
+              else if (Platform.isAndroid)
                 const ListTile(
                   leading: Icon(Icons.notifications_active_outlined),
                   title: Text('Always on'),
@@ -207,6 +258,41 @@ class SettingsPage extends StatelessWidget {
             .showSnackBar(SnackBar(content: Text('$e')));
       }
     }
+  }
+}
+
+/// Mac: shows a folder and lets the user pick another one.
+class _FolderTile extends StatelessWidget {
+  const _FolderTile({
+    required this.icon,
+    required this.title,
+    required this.path,
+    required this.hint,
+    required this.onPick,
+  });
+
+  final IconData icon;
+  final String title;
+  final String path;
+  final String hint;
+  final void Function(String) onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Icon(icon),
+      title: Text(title),
+      subtitle: Text('$path\n$hint'),
+      isThreeLine: true,
+      trailing: const Text('Change…'),
+      onTap: () async {
+        final picked = await FilePicker.getDirectoryPath(
+          dialogTitle: title,
+          initialDirectory: path,
+        );
+        if (picked != null) onPick(picked);
+      },
+    );
   }
 }
 

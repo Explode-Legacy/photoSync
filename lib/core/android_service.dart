@@ -77,14 +77,14 @@ class _EngineTask extends TaskHandler {
   }
 
   static String _statusText(SyncEngine e) {
-    final p = e.peer;
-    final where = p == null
-        ? 'Waiting for your other phone'
-        : 'Connected to ${p.info.name}';
+    final names = [for (final p in e.peers.values) p.info.name];
+    final where = names.isEmpty
+        ? 'Waiting for your other devices'
+        : 'Connected to ${names.join(', ')}';
     final counts = e.receivedCount + e.sentCount == 0
         ? ''
         : ' · ↓${e.receivedCount} ↑${e.sentCount}';
-    return e.syncing ? 'Sending photos…$counts' : '$where$counts';
+    return e.syncing ? 'Sending…$counts' : '$where$counts';
   }
 
   @override

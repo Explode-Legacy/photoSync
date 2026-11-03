@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 import '../core/settings.dart';
+import '../core/shared_inbox.dart';
 import '../core/sync_client.dart';
 import 'devices_page.dart';
 import 'picker_page.dart';
@@ -22,17 +23,27 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   SyncClient get c => widget.client;
+  final _shared = SharedInbox();
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _shared.addListener(_onShared);
+    _shared.start();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _shared.dispose();
     super.dispose();
+  }
+
+  /// Something was shared to PhotoBridge: ask where to send it.
+  void _onShared() {
+    if (!_shared.hasFiles || !mounted) return;
+    FileSender(c).sendShared(context, _shared.take());
   }
 
   @override
@@ -146,7 +157,7 @@ class _ConnectionCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final peer = state.peer;
+    final peers = state.peers;
     final unpaired = state.devices.where((d) => d['paired'] != true).toList();
 
     final (
@@ -154,23 +165,27 @@ class _ConnectionCard extends StatelessWidget {
       Color color,
       String title,
       String subtitle,
-    ) = switch (peer) {
-      final p? => (
+    ) = switch (peers) {
+      [_, ...] => (
         Icons.check_circle,
         Colors.green,
-        'Connected to ${p['name']}',
-        'via ${p['via']} · ${p['address']}',
+        'Connected to ${peers.map((p) => p['name']).join(', ')}',
+        [
+          for (final p in peers)
+            '${peers.length > 1 ? '${p['name']}: ' : ''}via ${p['via']} · '
+                '${p['address']}${p['inbound'] == false ? ' · inbound off' : ''}',
+        ].join('\n'),
       ),
-      null when unpaired.isNotEmpty => (
+      _ when unpaired.isNotEmpty => (
         Icons.link_off,
         scheme.tertiary,
         'Found ${unpaired.first['name']}, not paired',
         'Enter its pairing code in Settings → Pair',
       ),
-      null => (
+      _ => (
         Icons.wifi_find,
         scheme.outline,
-        'Looking for your other phone…',
+        'Looking for your other devices…',
         'Tap to scan or add an address (Tailscale, office…)',
       ),
     };
@@ -205,9 +220,11 @@ class _SyncCard extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     final since = MaterialLocalizations.of(context)
         .formatMediumDate(s.syncSince);
-    final online = s.peer != null;
+    final online = s.peers.isNotEmpty;
     final background = Platform.isAndroid
         ? 'Runs in the background, even when closed'
+        : Platform.isMacOS
+        ? 'Syncs while PhotoBridge runs on this Mac'
         : s.backgroundSync
         ? 'iOS also syncs in the background now and then'
         : 'Syncs while the app is open';
@@ -219,9 +236,11 @@ class _SyncCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              s.autoSend
-                  ? 'Auto-send is on · photos since $since'
-                  : 'Auto-send is off · use Sync now or Choose',
+              !s.autoSend
+                  ? 'Auto-send is off · use Sync now'
+                  : Platform.isMacOS
+                  ? 'Auto-send is on · photos in ${s.photosFolder}'
+                  : 'Auto-send is on · photos since $since',
               style: text.bodyMedium,
             ),
             const SizedBox(height: 4),
@@ -261,16 +280,18 @@ class _SyncCard extends StatelessWidget {
                           label: const Text('Sync now'),
                         ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: !online || s.syncing || !s.hasPhotoAccess
-                        ? null
-                        : onChoose,
-                    icon: const Icon(Icons.photo_library_outlined),
-                    label: const Text('Choose…'),
+                if (!Platform.isMacOS) ...[
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: !online || s.syncing || !s.hasPhotoAccess
+                          ? null
+                          : onChoose,
+                      icon: const Icon(Icons.photo_library_outlined),
+                      label: const Text('Choose…'),
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ],
@@ -295,7 +316,7 @@ class _ThisDeviceCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('This phone · ${state.deviceName}', style: text.titleSmall),
+            Text('This device · ${state.deviceName}', style: text.titleSmall),
             const SizedBox(height: 12),
             Text('Pairing code', style: text.labelMedium),
             InkWell(
