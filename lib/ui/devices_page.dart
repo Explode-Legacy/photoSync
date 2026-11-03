@@ -162,7 +162,9 @@ class _DevicesPageState extends State<DevicesPage> {
             ? 'Connected'
             : paired
             ? 'Paired'
-            : 'Not paired: enter its code in Settings'}',
+            : d['outdated'] == true
+            ? 'Update PhotoBridge there to connect'
+            : 'Not paired: use the same pairing code on both'}',
       ),
       trailing: TextButton(
         onPressed: () =>

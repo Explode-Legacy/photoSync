@@ -5,7 +5,30 @@ extension EngineReceiving on SyncEngine {
   // ---------------------------------------------------------------- receiving
 
   /// Keys for the current pairing code (derived once, then cached).
-  Future<PairKeys> _keys() => PairKeys.forCode(settings.syncKey);
+  /// The pairing code, stretched for SPAKE2 (once, then cached).
+  Future<List<int>> _stretchedCode() => CodeSecret.stretch(settings.syncKey);
+
+  Future<void> _onPaired(String id, String name, List<int> publicKey) async {
+    await settings.trust(id, name, publicKey);
+    _fingerprints[id] = await fingerprint(publicKey);
+    _addLog('info', 'Paired with $name (${_fingerprints[id]})');
+    _changed();
+  }
+
+  /// Unpairs every device (after the pairing code changes).
+  Future<void> _forgetAll() async {
+    await settings.forgetAll();
+    _client.dropSessions();
+    _server?.dropSessions();
+    _fingerprints.clear();
+    peers = {};
+  }
+
+  Future<void> _loadFingerprints() async {
+    for (final e in settings.trustedDevices.entries) {
+      _fingerprints[e.key] = await fingerprint(e.value.publicKey);
+    }
+  }
 
   Future<int> _onFixDates(String sender, List<DateFix> fixes) async {
     final fixed = await _library.repairDates(fixes);

@@ -7,10 +7,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// A newer PhotoBridge on the public downloads page.
 typedef Update = ({String version, Uri page});
 
-/// Checks the public releases repository (the source repository is
-/// private, so its releases can't be read without signing in).
+/// Checks the latest GitHub release of PhotoBridge.
 abstract final class Updates {
-  static const repo = 'Explode-Legacy/photoSync-releases';
+  static const repo = 'Explode-Legacy/photoSync';
   static const _lastCheck = 'updateLastCheck';
   static const _latest = 'updateLatest';
 

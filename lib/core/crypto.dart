@@ -6,50 +6,27 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 
-/// End-to-end encryption between devices that share a pairing code.
+/// Keys for one secure channel between two devices: a signing key for
+/// requests and replies, and an encryption key from which each request
+/// derives its own AES-256-GCM key using a random salt.
 ///
-/// The code is stretched with PBKDF2 (slow on purpose, so a recorded
-/// transfer can't be brute-forced quickly) and split with HKDF into:
-/// - an auth key, which signs every request and reply (the code itself is
-///   never sent);
-/// - an encryption key, from which each request derives its own AES-256-GCM
-///   key using a random salt.
-///
-/// This applies on every network, Tailscale included.
-class PairKeys {
-  PairKeys._(this._authKey, this._encKey);
+/// Made from a session secret (see identity.dart): fresh every few minutes,
+/// from throwaway keys, so old traffic stays private even if a device's
+/// long-term key or the pairing code leaks later.
+class ChannelKeys {
+  ChannelKeys._(this._authKey, this._encKey);
 
   final SecretKey _authKey;
   final SecretKey _encKey;
 
-  /// OWASP's recommendation for PBKDF2-HMAC-SHA256.
-  static const defaultIterations = 600000;
-
-  static final _cache = <String, Future<PairKeys>>{};
-
-  /// Keys for [code], derived once per process.
-  static Future<PairKeys> forCode(
-    String code, {
-    int iterations = defaultIterations,
-  }) =>
-      _cache.putIfAbsent('$iterations:$code', () => _derive(code, iterations));
-
-  static Future<PairKeys> _derive(String code, int iterations) async {
-    final master =
-        await Pbkdf2(
-          macAlgorithm: Hmac.sha256(),
-          iterations: iterations,
-          bits: 256,
-        ).deriveKeyFromPassword(
-          password: code,
-          nonce: utf8.encode('photobridge/v2/pairing'),
-        );
+  static Future<ChannelKeys> fromSecret(List<int> secret) async {
+    final master = SecretKey(secret);
     Future<SecretKey> sub(String info) => _hkdf.deriveKey(
       secretKey: master,
       nonce: const <int>[],
       info: utf8.encode(info),
     );
-    return PairKeys._(await sub('auth'), await sub('enc'));
+    return ChannelKeys._(await sub('pb3/auth'), await sub('pb3/enc'));
   }
 
   static final _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
@@ -63,23 +40,50 @@ class PairKeys {
     return base64Url.encode(mac.bytes);
   }
 
-  Future<bool> verify(String message, String signature) async {
-    final expected = utf8.encode(await sign(message));
-    final given = utf8.encode(signature);
-    if (expected.length != given.length) return false;
-    var diff = 0;
-    for (var i = 0; i < expected.length; i++) {
-      diff |= expected[i] ^ given[i];
-    }
-    return diff == 0;
-  }
+  Future<bool> verify(String message, String signature) async =>
+      constantTimeEquals(
+        utf8.encode(await sign(message)),
+        utf8.encode(signature),
+      );
 
   /// The AES-256-GCM key for one request, from its random [salt].
   Future<Sealer> sealer(List<int> salt) async => Sealer(
     await _hkdf.deriveKey(secretKey: _encKey, nonce: salt, info: _info),
   );
 
-  static final _info = utf8.encode('photobridge/v2/transfer');
+  static final _info = utf8.encode('pb3/transfer');
+}
+
+bool constantTimeEquals(List<int> a, List<int> b) {
+  if (a.length != b.length) return false;
+  var diff = 0;
+  for (var i = 0; i < a.length; i++) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff == 0;
+}
+
+/// The pairing code, stretched with PBKDF2 (600,000 rounds), for SPAKE2.
+/// Only used while pairing two devices; never for traffic.
+abstract final class CodeSecret {
+  static const defaultIterations = 600000;
+  static final _cache = <String, Future<List<int>>>{};
+
+  static Future<List<int>> stretch(
+    String code, {
+    int iterations = defaultIterations,
+  }) => _cache.putIfAbsent('$iterations:$code', () async {
+    final key =
+        await Pbkdf2(
+          macAlgorithm: Hmac.sha256(),
+          iterations: iterations,
+          bits: 320,
+        ).deriveKeyFromPassword(
+          password: code,
+          nonce: utf8.encode('photobridge/v3/pairing'),
+        );
+    return key.extractBytes();
+  });
 }
 
 /// Random bytes, base64url-encoded (salts and request nonces).

@@ -4,14 +4,41 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:photobridge/core/client.dart';
 import 'package:photobridge/core/crypto.dart';
 import 'package:photobridge/core/folder_library.dart';
+import 'package:photobridge/core/identity.dart';
 import 'package:photobridge/core/protocol.dart';
 import 'package:photobridge/core/scanner.dart';
 import 'package:photobridge/core/server.dart';
 import 'package:photobridge/core/settings.dart';
 
-/// Few PBKDF2 rounds keep tests fast; the app uses 600k.
-Future<PairKeys> testKeys(String code) =>
-    PairKeys.forCode(code, iterations: 10);
+/// One side's identity, trust list and pairing code.
+class TestDevice {
+  TestDevice(this.id, this.code);
+
+  final String id;
+  String code;
+  late DeviceIdentity identity;
+  final trusted = <String, TrustedDevice>{};
+
+  static Future<TestDevice> make(String id, String code) async =>
+      TestDevice(id, code)
+        ..identity = await DeviceIdentity.fromSeed(DeviceIdentity.newSeed());
+
+  /// Few PBKDF2 rounds keep tests fast; the app uses 600k.
+  Future<List<int>> stretched() => CodeSecret.stretch(code, iterations: 10);
+
+  Future<void> onPaired(String id, String name, List<int> pub) async =>
+      trusted[id] = (publicKey: pub, name: name);
+
+  PeerClient client({int? port}) => PeerClient(
+    selfId: id,
+    selfName: () => id,
+    identity: identity,
+    trusted: (i) => trusted[i],
+    pairingCode: stretched,
+    onPaired: onPaired,
+    selfPort: port == null ? null : () => port,
+  );
+}
 
 void main() {
   group('parseAddress', () {
@@ -63,7 +90,8 @@ void main() {
     final incoming = <IncomingFile>[];
     final receiving = <(int, int, bool)>[];
     final contacts = <(String, String, int)>[];
-    var key = 'SECRET12';
+    late TestDevice recv;
+    late TestDevice sender;
 
     setUp(() async {
       tmp = await Directory.systemTemp.createTemp('pb');
@@ -72,10 +100,14 @@ void main() {
       receiving.clear();
       contacts.clear();
       have.clear();
-      key = 'SECRET12';
+      recv = await TestDevice.make('recv', 'SECRET12');
+      sender = await TestDevice.make('send', 'SECRET12');
       server = ReceiveServer(
         selfInfo: () => {'id': 'recv', 'name': 'Pixel', 'os': 'android'},
-        keys: () => testKeys('SECRET12'),
+        identity: recv.identity,
+        trusted: (id) => recv.trusted[id],
+        pairingCode: recv.stretched,
+        onPaired: recv.onPaired,
         alreadyHave: (s, a) async => have.contains('$s|$a'),
         onFile: (f) async {
           received[f.name] = await f.file.readAsBytes();
@@ -92,11 +124,7 @@ void main() {
         tempRoot: tmp,
       );
       await server.start();
-      client = PeerClient(
-        selfId: 'send',
-        keys: () => testKeys(key),
-        selfPort: () => 4242,
-      );
+      client = sender.client(port: 4242);
     });
 
     tearDown(() async {
@@ -105,55 +133,71 @@ void main() {
       await tmp.delete(recursive: true);
     });
 
-    test('uploads, dedupes and rejects a wrong key', () async {
-      final info = await client.probe('127.0.0.1', server.port);
-      expect(info!.id, 'recv');
-      expect(info.paired, isTrue);
-      // The receiver learns where to reach the caller back.
-      expect(contacts.last, ('send', '127.0.0.1', 4242));
-      final peer = Peer(info, '127.0.0.1', server.port);
+    test(
+      'pairs once, uploads, dedupes; unpaired devices are refused',
+      () async {
+        final info = await client.probe('127.0.0.1', server.port);
+        expect(info!.id, 'recv');
+        expect(info.paired, isTrue);
+        // SPAKE2 swapped identity keys both ways.
+        expect(recv.trusted['send']!.publicKey, sender.identity.publicKey);
+        expect(sender.trusted['recv']!.publicKey, recv.identity.publicKey);
+        // The receiver learns where to reach the caller back.
+        expect(contacts.last, ('send', '127.0.0.1', 4242));
+        final peer = Peer(info, '127.0.0.1', server.port);
 
-      final src = File('${tmp.path}/src.bin')
-        ..writeAsBytesSync(List.generate(3 * 1024 * 1024, (i) => i % 251));
-      var lastProgress = 0;
-      Future<String> send() => client.upload(
-        peer,
-        assetId: 'A1',
-        file: src,
-        name: 'Trip clip #1.MOV',
-        kind: 'video',
-        created: DateTime.fromMillisecondsSinceEpoch(1700000000000),
-        location: (12.9716, 77.5946),
-        onProgress: (s, _) => lastProgress = s,
-      );
+        final src = File('${tmp.path}/src.bin')
+          ..writeAsBytesSync(List.generate(3 * 1024 * 1024, (i) => i % 251));
+        var lastProgress = 0;
+        Future<String> send() => client.upload(
+          peer,
+          assetId: 'A1',
+          file: src,
+          name: 'Trip clip #1.MOV',
+          kind: 'video',
+          created: DateTime.fromMillisecondsSinceEpoch(1700000000000),
+          location: (12.9716, 77.5946),
+          onProgress: (s, _) => lastProgress = s,
+        );
 
-      expect(await client.has(peer, 'A1'), isFalse);
-      expect(await send(), 'saved');
-      expect(lastProgress, src.lengthSync());
-      // The receiver counted every byte, then reported the end once.
-      final size = src.lengthSync();
-      expect(receiving.last, (size, size, true));
-      expect(receiving.where((r) => r.$3), hasLength(1));
-      expect(receiving.length, greaterThan(2));
-      expect(received['Trip clip #1.MOV'], src.readAsBytesSync());
-      expect(await client.has(peer, 'A1'), isTrue);
-      expect(await send(), 'duplicate');
-      // Staging folder is cleaned up after each upload.
-      expect(Directory('${tmp.path}/incoming').listSync(), isEmpty);
+        expect(await client.has(peer, 'A1'), isFalse);
+        expect(await send(), 'saved');
+        expect(lastProgress, src.lengthSync());
+        // The receiver counted every byte, then reported the end once.
+        final size = src.lengthSync();
+        expect(receiving.last, (size, size, true));
+        expect(receiving.where((r) => r.$3), hasLength(1));
+        expect(receiving.length, greaterThan(2));
+        expect(received['Trip clip #1.MOV'], src.readAsBytesSync());
+        expect(await client.has(peer, 'A1'), isTrue);
+        expect(await send(), 'duplicate');
+        // Staging folder is cleaned up after each upload.
+        expect(Directory('${tmp.path}/incoming').listSync(), isEmpty);
 
-      key = 'WRONG999';
-      expect((await client.probe('127.0.0.1', server.port))!.paired, isFalse);
-      await expectLater(
-        send(),
-        throwsA(
-          isA<TransferException>().having(
-            (e) => e.unauthorized,
-            'unauthorized',
-            isTrue,
+        // The code isn't needed any more once paired.
+        sender.code = 'CHANGED1';
+        expect((await client.probe('127.0.0.1', server.port))!.paired, isTrue);
+        // The receiver restarts and forgets our session: we start a new one.
+        server.dropSessions();
+        expect(await client.has(peer, 'A1'), isTrue);
+
+        // Unpaired (forgotten) with a different code: refused.
+        recv.trusted.clear();
+        server.dropSessions();
+        client.dropSessions();
+        expect((await client.probe('127.0.0.1', server.port))!.paired, isFalse);
+        await expectLater(
+          send(),
+          throwsA(
+            isA<TransferException>().having(
+              (e) => e.unauthorized,
+              'unauthorized',
+              isTrue,
+            ),
           ),
-        ),
-      );
-    });
+        );
+      },
+    );
 
     test('an interrupted upload resumes where it stopped', () async {
       final info = await client.probe('127.0.0.1', server.port);
@@ -187,16 +231,19 @@ void main() {
     test(
       'wrong codes get locked out; unsigned replies are untrusted',
       () async {
-        key = 'WRONG999';
+        sender.code = 'WRONG999';
         for (var i = 0; i < 5; i++) {
+          client.dropSessions(); // skip the client's own back-off
           expect(
             (await client.probe('127.0.0.1', server.port))!.paired,
             isFalse,
           );
         }
         // Locked out now, even with the right code, for a minute.
-        key = 'SECRET12';
+        sender.code = 'SECRET12';
+        client.dropSessions();
         expect(await client.probe('127.0.0.1', server.port), isNull);
+        expect(recv.trusted, isEmpty);
       },
     );
 
@@ -233,6 +280,8 @@ void main() {
   test('inbound off rejects photos but still takes files', () async {
     final tmp = await Directory.systemTemp.createTemp('pb');
     final got = <String>[];
+    final mac = await TestDevice.make('mac', 'SECRET12');
+    final phone = await TestDevice.make('send', 'SECRET12');
     final server = ReceiveServer(
       selfInfo: () => {
         'id': 'mac',
@@ -240,14 +289,17 @@ void main() {
         'os': 'macos',
         'inbound': false,
       },
-      keys: () => testKeys('SECRET12'),
+      identity: mac.identity,
+      trusted: (id) => mac.trusted[id],
+      pairingCode: mac.stretched,
+      onPaired: mac.onPaired,
       alreadyHave: (_, _) async => false,
       acceptsPhotos: () => false,
       onFile: (f) async => got.add(f.kind),
       tempRoot: tmp,
     );
     await server.start();
-    final client = PeerClient(selfId: 'send', keys: () => testKeys('SECRET12'));
+    final client = phone.client();
     try {
       final info = await client.probe('127.0.0.1', server.port);
       expect(info!.inbound, isFalse);

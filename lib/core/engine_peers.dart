@@ -96,6 +96,7 @@ extension EnginePeers on SyncEngine {
     'os': p.info.os,
     'address': p.address,
     'paired': p.info.paired,
+    'outdated': p.info.version < kProtocolVersion,
   };
 
   /// Bonjour results plus a direct sweep of the Wi-Fi subnet.

@@ -12,7 +12,6 @@ extension EngineSending on SyncEngine {
         p,
   ];
 
-
   /// Why automatic sending should wait right now, or null to go ahead.
   Future<String?> _autoBlocked() async {
     if (Platform.isMacOS) return null;

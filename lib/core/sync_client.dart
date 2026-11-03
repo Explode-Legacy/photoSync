@@ -43,6 +43,12 @@ class EngineState {
 
   bool get hasPhotoAccess => raw['hasPhotoAccess'] == true;
 
+  /// This device's key fingerprint, and the devices paired with it.
+  String get fingerprint => raw['fingerprint'] as String? ?? '';
+  List<Map<String, dynamic>> get trusted => [
+    for (final t in (raw['trusted'] as List? ?? [])) (t as Map).cast(),
+  ];
+
   /// Every connected device: id, name, os, address, via, inbound.
   List<Map<String, dynamic>> get peers => [
     for (final p in (raw['peers'] as List? ?? [])) (p as Map).cast(),

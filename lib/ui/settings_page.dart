@@ -53,9 +53,35 @@ class SettingsPage extends StatelessWidget {
               ListTile(
                 leading: const Icon(Icons.refresh),
                 title: const Text('New pairing code'),
-                subtitle: const Text('Unpairs the other phone'),
+                subtitle: const Text('Unpairs every other device'),
                 onTap: () => c.send('newPairingCode'),
               ),
+              ListTile(
+                leading: const Icon(Icons.fingerprint),
+                title: const Text('This device’s key'),
+                subtitle: Text(
+                  '${s.fingerprint}\nThe code is only used once, to pair. '
+                  'After that devices recognise each other by key, and each '
+                  'session gets fresh keys that are thrown away.',
+                ),
+                isThreeLine: true,
+              ),
+              for (final t in s.trusted)
+                ListTile(
+                  leading: const Icon(Icons.verified_user_outlined),
+                  title: Text('Paired: ${t['name']}'),
+                  subtitle: Text(
+                    'Key ${t['fingerprint'] ?? '…'}. It should match what '
+                    'that device shows under “This device’s key”.',
+                  ),
+                  trailing: TextButton(
+                    onPressed: () => c.send('forgetDevice', {
+                      'id': t['id'],
+                      'name': t['name'],
+                    }),
+                    child: const Text('Forget'),
+                  ),
+                ),
               const _Header('Connection'),
               ListTile(
                 leading: const Icon(Icons.devices_other_outlined),

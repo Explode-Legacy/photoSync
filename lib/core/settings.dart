@@ -4,6 +4,9 @@ import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'identity.dart';
+import 'server.dart' show TrustedDevice;
+
 /// Persisted user settings and device identity.
 class AppSettings {
   AppSettings._(this._p);
@@ -136,6 +139,49 @@ class AppSettings {
       if (d != id) d,
     if (!on) id,
   ]);
+
+  /// This device's identity key seed (32 bytes), made on first use.
+  Future<List<int>> identitySeed() async {
+    final stored = _p.getString('identitySeed');
+    if (stored != null) return base64Url.decode(stored);
+    final seed = DeviceIdentity.newSeed();
+    await _p.setString('identitySeed', base64Url.encode(seed));
+    return seed;
+  }
+
+  /// Devices paired with this one (by id): their identity key and name.
+  Map<String, TrustedDevice> get trustedDevices {
+    final raw = _p.getString('trusted');
+    if (raw == null) return {};
+    return {
+      for (final e in (jsonDecode(raw) as Map<String, dynamic>).entries)
+        e.key: (
+          publicKey: base64Url.decode((e.value as Map)['pub'] as String),
+          name: (e.value as Map)['name'] as String? ?? e.key,
+        ),
+    };
+  }
+
+  TrustedDevice? trustedDevice(String id) => trustedDevices[id];
+
+  Future<void> _saveTrusted(Map<String, TrustedDevice> m) => _p.setString(
+    'trusted',
+    jsonEncode({
+      for (final e in m.entries)
+        e.key: {
+          'pub': base64Url.encode(e.value.publicKey),
+          'name': e.value.name,
+        },
+    }),
+  );
+
+  Future<void> trust(String id, String name, List<int> publicKey) =>
+      _saveTrusted({...trustedDevices, id: (publicKey: publicKey, name: name)});
+
+  Future<void> forget(String id) =>
+      _saveTrusted({...trustedDevices}..remove(id));
+
+  Future<void> forgetAll() => _p.remove('trusted');
 
   /// Simple toggles the UI may change by name.
   static const toggles = {

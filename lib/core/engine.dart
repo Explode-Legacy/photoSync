@@ -11,6 +11,7 @@ import 'crypto.dart';
 import 'discovery.dart';
 import 'file_store.dart';
 import 'folder_library.dart';
+import 'identity.dart';
 import 'history.dart';
 import 'ledger.dart';
 import 'media_library.dart';
@@ -92,6 +93,10 @@ class SyncEngine {
   /// Called (throttled) whenever [toState] would return something new.
   void Function()? onChange;
 
+  /// This device's long-term key, and its short fingerprint for the UI.
+  late final DeviceIdentity identity;
+  late final String fingerprintText;
+
   bool hasPhotoAccess = false;
 
   /// Connected (paired and reachable) devices by id.
@@ -127,6 +132,9 @@ class SyncEngine {
   /// iPhone only: whether the app is on screen. Auto-sync never starts in
   /// the background on its own; background tasks start it explicitly.
   bool appInForeground = true;
+
+  /// Fingerprints of trusted devices' keys, for the UI.
+  final Map<String, String> _fingerprints = {};
 
   /// Where paired devices last reached us from, by device id.
   final Map<String, ({String host, int port, DateTime seen})> _contacts = {};
@@ -172,11 +180,18 @@ class SyncEngine {
   }
 
   Future<void> _init() async {
+    identity = await DeviceIdentity.fromSeed(await settings.identitySeed());
+    fingerprintText = await fingerprint(identity.publicKey);
+    await _loadFingerprints();
     // Stretching the code takes a moment; start it before it's needed.
-    unawaited(_keys());
+    unawaited(_stretchedCode());
     _client = PeerClient(
       selfId: settings.deviceId,
-      keys: _keys,
+      selfName: () => settings.deviceName,
+      identity: identity,
+      trusted: settings.trustedDevice,
+      pairingCode: _stretchedCode,
+      onPaired: _onPaired,
       selfPort: () => port,
     );
     _discovery = LanDiscovery(selfId: settings.deviceId);
@@ -199,7 +214,10 @@ class SyncEngine {
         'os': os,
         'inbound': settings.inbound,
       },
-      keys: _keys,
+      identity: identity,
+      trusted: settings.trustedDevice,
+      pairingCode: _stretchedCode,
+      onPaired: _onPaired,
       acceptsPhotos: () => settings.inbound,
       onReceiving: _onReceiving,
       onContact: _onContact,
@@ -261,6 +279,15 @@ class SyncEngine {
     return {
       'settings': settings.toJson(),
       'hasPhotoAccess': hasPhotoAccess,
+      'fingerprint': fingerprintText,
+      'trusted': [
+        for (final e in settings.trustedDevices.entries)
+          {
+            'id': e.key,
+            'name': e.value.name,
+            'fingerprint': ?_fingerprints[e.key],
+          },
+      ],
       'peers': [
         for (final p in peers.values)
           {
@@ -373,13 +400,22 @@ class SyncEngine {
           final code = normalizePairingCode(cmd['code'] as String);
           if (code.length < 6) throw ArgumentError('Code is too short');
           await settings.setSyncKey(code);
-          peers = {};
           _addLog('info', 'Pairing code updated');
+          // Pair again with whoever has the new code.
+          await _forgetAll();
           await _probe();
         case 'newPairingCode':
           await settings.setSyncKey(generatePairingCode());
-          peers = {};
+          await _forgetAll();
+          _addLog('info', 'New pairing code: other devices are unpaired');
           await _probe();
+        case 'forgetDevice':
+          final id = cmd['id'] as String;
+          await settings.forget(id);
+          _client.dropSessions(id);
+          _server?.dropSessions(id);
+          peers.remove(id);
+          _addLog('info', 'Forgot ${cmd['name'] ?? id}');
         case 'setDeviceName':
           final name = (cmd['name'] as String).trim();
           if (name.isNotEmpty) {

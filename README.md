@@ -23,16 +23,27 @@ the same Wi-Fi or Tailscale. No cloud, no account.
 
 ## Security
 
-- End to end, on every network (Tailscale included): the pairing code is
-  stretched with PBKDF2-SHA256 (600,000 rounds) and split with HKDF into a
-  signing key and an encryption key. The code itself is never sent.
-- Every request and reply is signed (HMAC-SHA256) with a timestamp and a
-  one-time nonce, so captured requests can't be replayed.
-- File contents and all metadata (names, dates, locations, folders, albums)
-  are encrypted with AES-256-GCM, with a fresh key per request, in 1 MB
-  chunks that can't be altered, reordered or cut off unnoticed.
-- Five wrong codes in a minute lock that address out for a minute.
-- Only `/info` answers strangers: device name and kind, so it can be paired.
+Built like Signal/WhatsApp's key handling, on every network (Tailscale
+included):
+
+- **Identity keys.** Each device makes its own X25519 key pair on first run;
+  the private key never leaves it. Settings shows each key's fingerprint.
+- **Pairing with SPAKE2** (RFC 9382, P-256). The pairing code is used once,
+  to prove two devices know it and swap identity keys. A recorded pairing
+  can't be brute-forced offline; live guesses are limited to 5 a minute.
+  After that the code isn't used.
+- **Forward-secret sessions (Noise KK).** Every session mixes fresh
+  throwaway X25519 keys with both identity keys and lasts 10 minutes; the
+  throwaway keys are then forgotten, so recorded traffic stays private even
+  if a device's key or the pairing code leaks later.
+- **Inside a session** every request and reply is signed (HMAC-SHA256, with
+  a timestamp and one-time nonce against replays), and file contents and all
+  metadata (names, dates, locations, folders, albums) are encrypted with
+  AES-256-GCM in 1 MB chunks that can't be altered, reordered or cut off.
+- Only `/info` answers strangers: device name, kind and public key.
+
+Changing the pairing code unpairs every device; Settings can also forget
+one device.
 
 Interrupted uploads resume from the last full megabyte.
 
@@ -58,7 +69,7 @@ Interrupted uploads resume from the last full megabyte.
 
 ## Install
 
-Download from [the downloads page](https://github.com/Explode-Legacy/photoSync-releases/releases)
+Download from [Releases](https://github.com/Explode-Legacy/photoSync/releases/latest)
 (the app also tells you when there's a new version):
 
 - `PhotoBridge.apk`: install on Android (allow installs from unknown sources).

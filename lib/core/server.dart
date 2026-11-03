@@ -6,6 +6,7 @@ import 'package:cryptography/cryptography.dart' show Sha256;
 import 'package:path_provider/path_provider.dart';
 
 import 'crypto.dart';
+import 'identity.dart';
 import 'protocol.dart';
 
 /// A file fully received, decrypted and written to a temp path, ready to be
@@ -45,21 +46,48 @@ class IncomingFile {
 /// A corrected capture date for a photo sent earlier (`POST /fixdates`).
 typedef DateFix = ({String name, DateTime created, (double, double)? location});
 
-/// A request that passed the signature check.
+/// A request that passed the signature check of its session.
 class _Signed {
-  _Signed(this.sender, this.nonce, this.sealer, this.meta);
+  _Signed(this.sender, this.nonce, this.keys, this.sealer, this.meta);
 
   final String sender;
   final String nonce;
+  final ChannelKeys keys;
   final Sealer? sealer;
   final Map<String, dynamic> meta;
+}
+
+/// A trusted device's identity key and the name it had when paired.
+typedef TrustedDevice = ({List<int> publicKey, String name});
+
+/// An established session: who it's with and its keys.
+class _Session {
+  _Session(this.peerId, this.keys);
+
+  final String peerId;
+  final ChannelKeys keys;
+  final DateTime created = DateTime.now();
+}
+
+/// SPAKE2 waiting for the initiator's confirmation.
+class _PendingPair {
+  _PendingPair(this.id, this.name, this.publicKey, this.transcript);
+
+  final String id;
+  final String name;
+  final List<int> publicKey;
+  final List<int> transcript;
+  final DateTime created = DateTime.now();
 }
 
 /// HTTP server that accepts photos and files from paired devices.
 class ReceiveServer {
   ReceiveServer({
     required this.selfInfo,
-    required this.keys,
+    required this.identity,
+    required this.trusted,
+    required this.pairingCode,
+    required this.onPaired,
     required this.alreadyHave,
     required this.onFile,
     this.acceptsPhotos = _always,
@@ -74,8 +102,18 @@ class ReceiveServer {
   /// Returns this device's id/name/os/inbound for `GET /info`.
   final Map<String, dynamic> Function() selfInfo;
 
-  /// Keys for the current pairing code.
-  final Future<PairKeys> Function() keys;
+  /// This device's identity key pair.
+  final DeviceIdentity identity;
+
+  /// The device we trust under [id] (from an earlier pairing), or null.
+  final TrustedDevice? Function(String id) trusted;
+
+  /// The stretched pairing code (see [CodeSecret.stretch]).
+  final Future<List<int>> Function() pairingCode;
+
+  /// A device proved it knows the pairing code: trust its key from now on.
+  final Future<void> Function(String id, String name, List<int> publicKey)
+  onPaired;
 
   /// Whether we still hold this asset from that sender.
   final Future<bool> Function(String senderId, String assetId) alreadyHave;
@@ -114,6 +152,16 @@ class ReceiveServer {
   late Directory _partial;
 
   int get port => _server?.port ?? 0;
+
+  final Map<String, _Session> _sessions = {};
+  final Map<String, _PendingPair> _pairs = {};
+
+  /// Sessions are replaced this often; their throwaway keys are forgotten.
+  static const sessionLifetime = Duration(minutes: 10);
+
+  /// Ends sessions with [peerId] (e.g. after forgetting that device), or all.
+  void dropSessions([String? peerId]) =>
+      _sessions.removeWhere((_, s) => peerId == null || s.peerId == peerId);
 
   /// Nonces seen in the last [_maxSkew], so a captured request can't be
   /// replayed.
@@ -197,15 +245,26 @@ class ReceiveServer {
     }
   }
 
-  /// Checks the signature and decrypts the metadata. Null when unsigned or
-  /// signed with a different pairing code.
+  /// Checks the request against its session and decrypts the metadata.
+  /// Null when it has no valid session or signature.
   Future<_Signed?> _verify(HttpRequest req) async {
     final h = req.headers;
     final sender = h.value(Hdr.sender);
+    final sessionId = h.value(Hdr.session);
     final tsText = h.value(Hdr.ts);
     final nonce = h.value(Hdr.nonce);
     final sig = h.value(Hdr.auth);
-    if (sender == null || tsText == null || nonce == null || sig == null) {
+    if (sender == null ||
+        sessionId == null ||
+        tsText == null ||
+        nonce == null ||
+        sig == null) {
+      return null;
+    }
+    final session = _sessions[sessionId];
+    if (session == null ||
+        session.peerId != sender ||
+        DateTime.now().difference(session.created) > sessionLifetime * 2) {
       return null;
     }
     final ts = int.tryParse(tsText) ?? 0;
@@ -213,14 +272,13 @@ class ReceiveServer {
     if ((now - ts).abs() > _maxSkew.inMilliseconds) return null;
     final salt = h.value(Hdr.salt) ?? '';
     final meta = h.value(Hdr.meta) ?? '';
-    final k = await keys();
-    final ok = await k.verify(
+    final ok = await session.keys.verify(
       signedRequest(
         method: req.method,
         target: requestTarget(req.uri),
         ts: tsText,
         nonce: nonce,
-        sender: sender,
+        sender: '$sender|$sessionId',
         salt: salt,
         meta: meta,
       ),
@@ -234,11 +292,126 @@ class ReceiveServer {
     if (_seen.containsKey(nonce)) return null;
     _seen[nonce] = now;
 
-    final sealer = salt.isEmpty ? null : await k.sealer(base64Url.decode(salt));
+    final sealer = salt.isEmpty
+        ? null
+        : await session.keys.sealer(base64Url.decode(salt));
     final m = sealer == null || meta.isEmpty
         ? <String, dynamic>{}
         : await sealer.openJson(meta);
-    return _Signed(sender, nonce, sealer, m);
+    return _Signed(sender, nonce, session.keys, sealer, m);
+  }
+
+  static Future<Map<String, dynamic>> _readJson(HttpRequest req) async {
+    // Handshake bodies are tiny; refuse anything big.
+    final bytes = <int>[];
+    await for (final chunk in req) {
+      bytes.addAll(chunk);
+      if (bytes.length > 16 * 1024) throw const CryptoException('Too large');
+    }
+    return jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+  }
+
+  /// SPAKE2, responder side: answer with our share, key and confirmation.
+  Future<void> _pairStart(HttpRequest req) async {
+    final j = await _readJson(req);
+    final id = j['id'] as String? ?? '';
+    final pubA = base64Url.decode(j['pub'] as String? ?? '');
+    final shareA = base64Url.decode(j['share'] as String? ?? '');
+    if (id.isEmpty || pubA.length != 32) {
+      return _reply(req, null, 400, {'error': 'bad pairing request'});
+    }
+    // Each attempt is one guess at the code: count it until confirmed.
+    _recordFailure(_remoteHost(req));
+    final b = Spake2.start(await pairingCode(), initiator: false);
+    final k = b.sharedKey(shareA);
+    final transcript = pairingTranscript(
+      idA: id,
+      pubA: pubA,
+      idB: selfInfo()['id'] as String,
+      pubB: identity.publicKey,
+      shareA: shareA,
+      shareB: b.message,
+      k: k,
+      w: b.wBytes,
+    );
+    final pairId = randomToken();
+    _pairs.removeWhere(
+      (_, p) =>
+          DateTime.now().difference(p.created) > const Duration(minutes: 1),
+    );
+    _pairs[pairId] = _PendingPair(
+      id,
+      j['name'] as String? ?? id,
+      pubA,
+      transcript,
+    );
+    await _reply(req, null, 200, {
+      'pair': pairId,
+      'pub': identity.publicKeyText,
+      'share': base64Url.encode(b.message),
+      'confirm': await pairingConfirm(transcript, 'B'),
+    });
+  }
+
+  /// SPAKE2, last step: the initiator's confirmation proves its code.
+  Future<void> _pairConfirm(HttpRequest req) async {
+    final j = await _readJson(req);
+    final pending = _pairs.remove(j['pair'] as String? ?? '');
+    if (pending == null) {
+      return _reply(req, null, 400, {'error': 'pairing expired'});
+    }
+    final expected = await pairingConfirm(pending.transcript, 'A');
+    final given = j['confirm'] as String? ?? '';
+    if (!constantTimeEquals(utf8.encode(expected), utf8.encode(given))) {
+      _recordFailure(_remoteHost(req));
+      return _reply(req, null, 401, {'error': 'pair'});
+    }
+    _failures.remove(_remoteHost(req));
+    await onPaired(pending.id, pending.name, pending.publicKey);
+    dropSessions(pending.id);
+    await _reply(req, null, 200, {'ok': true});
+  }
+
+  /// Noise KK, responder side, for a device we already trust.
+  Future<void> _session(HttpRequest req) async {
+    final j = await _readJson(req);
+    final id = j['id'] as String? ?? '';
+    final ephI = base64Url.decode(j['eph'] as String? ?? '');
+    final known = trusted(id);
+    if (known == null || ephI.length != 32) {
+      return _reply(req, null, 401, {'error': 'pair'});
+    }
+    final eph = await newEphemeral();
+    final ephR = (await eph.extractPublicKey()).bytes;
+    final (keys, h) = await kkSession(
+      initiator: false,
+      idI: id,
+      idR: selfInfo()['id'] as String,
+      staticI: known.publicKey,
+      staticR: identity.publicKey,
+      ephemeralI: ephI,
+      ephemeralR: ephR,
+      myStatic: identity.keyPair,
+      myEphemeral: eph,
+    );
+    // A trusted device is starting a session: we can reach it back there.
+    // (Spoofing this only makes us probe an address, which then fails.)
+    onContact?.call(
+      id,
+      _remoteHost(req),
+      int.tryParse(req.headers.value(Hdr.port) ?? '') ?? kDefaultPort,
+    );
+    final sessionId = randomToken();
+    _sessions.removeWhere(
+      (_, s) => DateTime.now().difference(s.created) > sessionLifetime * 2,
+    );
+    _sessions[sessionId] = _Session(id, keys);
+    await _reply(req, null, 200, {
+      'session': sessionId,
+      'eph': base64Url.encode(ephR),
+      // Proves we hold our identity key (the client checks it).
+      'confirm': await keys.sign('pb3/session-ok|${base64Url.encode(h)}'),
+    });
   }
 
   void _noteContact(HttpRequest req, _Signed s) {
@@ -258,11 +431,20 @@ class ReceiveServer {
       if (signed != null) _noteContact(req, signed);
       switch ((req.method, req.uri.path)) {
         case ('GET', '/info'):
+          final caller = req.headers.value(Hdr.sender);
           await _reply(req, signed, 200, {
             ...selfInfo(),
             'v': kProtocolVersion,
-            'paired': signed != null,
+            'pub': identity.publicKeyText,
+            // Informational: whether we trust the caller's id.
+            'paired': caller != null && trusted(caller) != null,
           });
+        case ('POST', '/pair'):
+          await _pairStart(req);
+        case ('POST', '/pair/confirm'):
+          await _pairConfirm(req);
+        case ('POST', '/session'):
+          await _session(req);
         case ('GET', '/status') when signed != null:
           final asset = signed.meta['asset'] as String? ?? '';
           final part = await _partialFile(signed.sender, asset);
@@ -277,7 +459,8 @@ class ReceiveServer {
           await _fixDates(req, signed);
         case (_, '/status' || '/upload' || '/fixdates'):
           await req.drain<void>();
-          await _reply(req, null, 401, {'error': 'pair'});
+          // The client starts a new session (or pairs) and retries.
+          await _reply(req, null, 401, {'error': 'session'});
         default:
           await req.drain<void>();
           await _reply(req, null, 404, {'error': 'not found'});
@@ -452,10 +635,9 @@ class ReceiveServer {
       ..statusCode = status
       ..headers.contentType = ContentType.json;
     if (s != null) {
-      final k = await keys();
       req.response.headers.set(
         Hdr.sig,
-        await k.sign(signedResponse(s.nonce, status, text)),
+        await s.keys.sign(signedResponse(s.nonce, status, text)),
       );
     }
     req.response.write(text);

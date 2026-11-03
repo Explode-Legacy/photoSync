@@ -5,8 +5,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:photobridge/core/crypto.dart';
 
 void main() {
-  // Few PBKDF2 rounds keep the tests fast; the app uses 600k.
-  Future<PairKeys> keys(String code) => PairKeys.forCode(code, iterations: 10);
+  // Channel keys come from a session secret (see identity_test.dart).
+  Future<ChannelKeys> keys(String code) => ChannelKeys.fromSecret(
+    List.generate(32, (i) => code.codeUnitAt(i % code.length)),
+  );
 
   test('signatures check the code', () async {
     final a = await keys('ABCD2345');
