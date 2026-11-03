@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -29,23 +31,34 @@ android {
         versionName = flutter.versionName
     }
 
-    // CI passes the key that signed the installed app via PB_KEYSTORE, so its
-    // APKs install as updates. Local builds use the machine's debug key.
-    val sharedKeystore = System.getenv("PB_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
+    // Release key: on GitHub from secrets (PB_KEYSTORE + PB_KEYSTORE_PASSWORD),
+    // on the developer's Mac from ~/.android/photobridge-release.properties.
+    // Without either, builds fall back to the debug key.
+    val releaseKey: Map<String, String>? = run {
+        System.getenv("PB_KEYSTORE")?.takeIf { file(it).exists() }?.let { path ->
+            val pass = System.getenv("PB_KEYSTORE_PASSWORD") ?: return@let null
+            mapOf("storeFile" to path, "storePassword" to pass, "keyAlias" to "photobridge", "keyPassword" to pass)
+        } ?: File(System.getProperty("user.home"), ".android/photobridge-release.properties")
+            .takeIf { it.exists() }
+            ?.let { f ->
+                Properties().apply { f.inputStream().use { load(it) } }
+                    .let { props -> props.stringPropertyNames().associateWith { props.getProperty(it) } }
+            }
+    }
     signingConfigs {
-        if (sharedKeystore != null) {
-            create("shared") {
-                storeFile = sharedKeystore
-                storePassword = "android"
-                keyAlias = "androiddebugkey"
-                keyPassword = "android"
+        if (releaseKey != null) {
+            create("release") {
+                storeFile = file(releaseKey.getValue("storeFile"))
+                storePassword = releaseKey.getValue("storePassword")
+                keyAlias = releaseKey.getValue("keyAlias")
+                keyPassword = releaseKey.getValue("keyPassword")
             }
         }
     }
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName(if (sharedKeystore != null) "shared" else "debug")
+            signingConfig = signingConfigs.getByName(if (releaseKey != null) "release" else "debug")
         }
     }
 }

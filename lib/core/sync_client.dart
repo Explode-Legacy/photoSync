@@ -7,6 +7,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'android_service.dart';
 import 'engine.dart';
 import 'ios_background.dart';
+import 'mac_bridge.dart';
 import 'settings.dart';
 
 /// Read-only view of an engine snapshot ([SyncEngine.toState]).
@@ -30,6 +31,13 @@ class EngineState {
   ];
 
   bool get inbound => _s['inbound'] != false;
+  bool get wifiOnly => _s['wifiOnly'] == true;
+  bool get lowBatteryPause => _s['lowBatteryPause'] != false;
+  bool get keepAlive => _s['keepAlive'] == true;
+  bool get menuBarOnly => _s['menuBarOnly'] == true;
+  Set<String> get noAutoTo => {
+    ...(_s['noAutoTo'] as List? ?? []).cast<String>(),
+  };
   String get photosFolder => _s['photosFolder'] as String? ?? '';
   String get filesFolder => _s['filesFolder'] as String? ?? '';
 
@@ -63,6 +71,7 @@ class EngineState {
   ];
   int get sentCount => raw['sentCount'] as int? ?? 0;
   int get receivedCount => raw['receivedCount'] as int? ?? 0;
+  int get historyVersion => raw['historyVersion'] as int? ?? 0;
 }
 
 /// What the UI uses to observe and control the engine, wherever it runs.
@@ -98,6 +107,8 @@ class LocalSyncClient extends SyncClient {
     );
     IosContinuedSync.onExpired = () => engine.handle({'cmd': 'cancel'});
     await scheduleIosBackgroundSync(engine.settings.backgroundSync);
+    if (engine.settings.keepAlive) await IosContinuedSync.setKeepAlive(true);
+    if (engine.settings.menuBarOnly) await MacBridge.setMenuBarOnly(true);
     return LocalSyncClient._(engine);
   }
 
@@ -113,6 +124,12 @@ class LocalSyncClient extends SyncClient {
   void send(String cmd, [Map<String, dynamic> args = const {}]) {
     if (cmd == 'setToggle' && args['key'] == 'backgroundSync') {
       scheduleIosBackgroundSync(args['value'] == true);
+    }
+    if (cmd == 'setToggle' && args['key'] == 'keepAlive') {
+      IosContinuedSync.setKeepAlive(args['value'] == true);
+    }
+    if (cmd == 'setToggle' && args['key'] == 'menuBarOnly') {
+      MacBridge.setMenuBarOnly(args['value'] == true);
     }
     _engine.handle({'cmd': cmd, ...args});
   }

@@ -116,12 +116,37 @@ class AppSettings {
     return _p.setString(key, path);
   }
 
+  /// Auto-send only on Wi-Fi or Ethernet, not mobile data (also when
+  /// Tailscale runs over mobile data).
+  bool get wifiOnly => _p.getBool('wifiOnly') ?? false;
+
+  /// Pause auto-send below 15% battery unless charging (Android).
+  bool get lowBatteryPause => _p.getBool('lowBatteryPause') ?? true;
+
+  /// iPhone: keep the app running in the background by playing silence.
+  bool get keepAlive => _p.getBool('keepAlive') ?? false;
+
+  /// Mac: live in the menu bar instead of the Dock.
+  bool get menuBarOnly => _p.getBool('menuBarOnly') ?? false;
+
+  /// Devices (by id) that don't get photos automatically from here.
+  Set<String> get noAutoTo => {...?_p.getStringList('noAutoTo')};
+  Future<void> setAutoTo(String id, bool on) => _p.setStringList('noAutoTo', [
+    for (final d in noAutoTo)
+      if (d != id) d,
+    if (!on) id,
+  ]);
+
   /// Simple toggles the UI may change by name.
   static const toggles = {
     'autoSend',
     'includeVideos',
     'backgroundSync',
     'inbound',
+    'wifiOnly',
+    'lowBatteryPause',
+    'keepAlive',
+    'menuBarOnly',
   };
 
   Future<void> setToggle(String key, bool v) {
@@ -139,6 +164,11 @@ class AppSettings {
     'syncSince': syncSince.millisecondsSinceEpoch,
     'backgroundSync': backgroundSync,
     'inbound': inbound,
+    'wifiOnly': wifiOnly,
+    'lowBatteryPause': lowBatteryPause,
+    'keepAlive': keepAlive,
+    'menuBarOnly': menuBarOnly,
+    'noAutoTo': [...noAutoTo],
     if (Platform.isMacOS) ...{
       'photosFolder': photosFolder,
       'filesFolder': filesFolder,

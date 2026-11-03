@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:photobridge/core/updates.dart';
 import 'package:photobridge/ui/format.dart';
 
 void main() {
@@ -20,5 +21,12 @@ void main() {
     );
     // Before the first measurement there's no speed yet.
     expect(formatTransfer({'frac': 0, 'bytes': 0, 'size': 0}), '0%');
+  });
+
+  test('version comparison', () {
+    expect(Updates.compareVersions('v1.3.0', '1.2.2'), greaterThan(0));
+    expect(Updates.compareVersions('v1.2.10', '1.2.9'), greaterThan(0));
+    expect(Updates.compareVersions('1.2.2', 'v1.2.2'), 0);
+    expect(Updates.compareVersions('1.2.2+6', '1.3.0'), lessThan(0));
   });
 }

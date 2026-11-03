@@ -34,8 +34,9 @@ class FileStore {
   }
 
   /// Moves [incoming] to [dir]/[name] (both already sanitized), renaming to
-  /// "name (1).ext" etc. when taken. Returns the path relative to the root.
-  Future<String> save(
+  /// "name (1).ext" etc. when taken. Returns the full path, and the path
+  /// relative to the root for showing.
+  Future<({String path, String shown})> save(
     File incoming, {
     required String dir,
     required String name,
@@ -50,7 +51,7 @@ class FileStore {
       // Different volume (app cache → shared storage): copy instead.
       await incoming.copy(dest.path);
     }
-    return dest.path.substring(root.path.length + 1);
+    return (path: dest.path, shown: dest.path.substring(root.path.length + 1));
   }
 
   static Future<File> _unique(Directory folder, String name) async {

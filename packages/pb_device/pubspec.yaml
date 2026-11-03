@@ -1,0 +1,19 @@
+name: pb_device
+description: Battery state for PhotoBridge, readable from any isolate (including Android's background service).
+version: 0.0.1
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.photobridge.pb_device
+        pluginClass: PbDevicePlugin

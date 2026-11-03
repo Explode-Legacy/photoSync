@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../core/mac_bridge.dart';
 import '../core/settings.dart';
 import '../core/sync_client.dart';
 import 'devices_page.dart';
@@ -136,13 +137,82 @@ class SettingsPage extends StatelessWidget {
                 ),
               ListTile(
                 leading: const Icon(Icons.history),
-                title: const Text('Forget sent history'),
+                title: const Text('Re-check sent photos'),
                 subtitle: const Text(
-                  'Re-check everything again. Other devices still skip '
-                  'photos they already have.',
+                  'Asks the other devices again. Photos they still have are '
+                  'skipped; any they deleted are sent again.',
                 ),
-                onTap: () => c.send('resetSent'),
+                onTap: () {
+                  c.send('resetSent');
+                  c.send('sync');
+                },
               ),
+              ListTile(
+                leading: const Icon(Icons.event_repeat),
+                title: const Text('Fix dates of photos sent earlier'),
+                subtitle: const Text(
+                  'For copies saved with the day they arrived (e.g. WhatsApp '
+                  'photos from before 1.0.1). Camera photos aren’t touched.',
+                ),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    helpText: 'Fix photos taken since',
+                    initialDate: DateTime.now().subtract(
+                      const Duration(days: 60),
+                    ),
+                    firstDate: DateTime(2000),
+                    lastDate: DateTime.now(),
+                  );
+                  if (picked != null) {
+                    c.send('fixDates', {
+                      'sinceMs': picked.millisecondsSinceEpoch,
+                    });
+                  }
+                },
+              ),
+              if (_knownDevices(s).isNotEmpty) ...[
+                const _Header('Auto-send to'),
+                for (final d in _knownDevices(s))
+                  SwitchListTile(
+                    secondary: Icon(switch (d.os) {
+                      'ios' => Icons.phone_iphone,
+                      'macos' => Icons.laptop_mac,
+                      _ => Icons.phone_android,
+                    }),
+                    title: Text(d.name),
+                    subtitle: const Text(
+                      'New photos go here automatically. Off: only when '
+                      'you send them yourself.',
+                    ),
+                    value: !s.noAutoTo.contains(d.id),
+                    onChanged: (v) =>
+                        c.send('setAutoTo', {'id': d.id, 'on': v}),
+                  ),
+              ],
+              if (!Platform.isMacOS) ...[
+                const _Header('Battery & data'),
+                SwitchListTile(
+                  secondary: const Icon(Icons.wifi),
+                  title: const Text('Auto-send on Wi-Fi only'),
+                  subtitle: const Text(
+                    'Waits for Wi-Fi instead of using mobile data (also '
+                    'over Tailscale). Sending by hand still works.',
+                  ),
+                  value: s.wifiOnly,
+                  onChanged: (v) => toggle('wifiOnly', v),
+                ),
+                if (Platform.isAndroid)
+                  SwitchListTile(
+                    secondary: const Icon(Icons.battery_alert_outlined),
+                    title: const Text('Pause on low battery'),
+                    subtitle: const Text(
+                      'Below 15% and not charging, auto-send waits.',
+                    ),
+                    value: s.lowBatteryPause,
+                    onChanged: (v) => toggle('lowBatteryPause', v),
+                  ),
+              ],
               const _Header('Receiving'),
               SwitchListTile(
                 secondary: const Icon(Icons.move_to_inbox_outlined),
@@ -167,17 +237,28 @@ class SettingsPage extends StatelessWidget {
                       c.send('setFolder', {'key': 'filesFolder', 'path': path}),
                 ),
               const _Header('Background'),
-              if (Platform.isMacOS)
+              if (Platform.isMacOS) ...[
+                const _LaunchAtLoginTile(),
+                SwitchListTile(
+                  secondary: const Icon(Icons.menu),
+                  title: const Text('Show in menu bar only'),
+                  subtitle: const Text(
+                    'No Dock icon; open or quit PhotoBridge from its menu '
+                    'bar icon.',
+                  ),
+                  value: s.menuBarOnly,
+                  onChanged: (v) => toggle('menuBarOnly', v),
+                ),
                 const ListTile(
                   leading: Icon(Icons.laptop_mac),
                   title: Text('Runs while the app is open'),
                   subtitle: Text(
                     'Closing the window keeps PhotoBridge running; click its '
-                    'Dock icon to bring it back. Quit it (⌘Q) to stop. '
-                    'Nothing syncs while the Mac sleeps.',
+                    'Dock (or menu bar) icon to bring it back. Quit it (⌘Q) '
+                    'to stop. Nothing syncs while the Mac sleeps.',
                   ),
-                )
-              else if (Platform.isAndroid)
+                ),
+              ] else if (Platform.isAndroid)
                 const ListTile(
                   leading: Icon(Icons.notifications_active_outlined),
                   title: Text('Always on'),
@@ -190,6 +271,18 @@ class SettingsPage extends StatelessWidget {
                   ),
                 )
               else ...[
+                SwitchListTile(
+                  secondary: const Icon(Icons.all_inclusive),
+                  title: const Text('Keep running in background'),
+                  subtitle: const Text(
+                    'Keeps syncing after you leave the app by playing '
+                    'silence (your music isn’t affected). Uses some '
+                    'battery; iOS may still stop it on low memory or after '
+                    'a restart.',
+                  ),
+                  value: s.keepAlive,
+                  onChanged: (v) => toggle('keepAlive', v),
+                ),
                 SwitchListTile(
                   secondary: const Icon(Icons.update),
                   title: const Text('Background sync'),
@@ -258,6 +351,73 @@ class SettingsPage extends StatelessWidget {
             .showSnackBar(SnackBar(content: Text('$e')));
       }
     }
+  }
+}
+
+/// Devices seen (connected or found), by id, for per-device settings.
+List<({String id, String name, String os})> _knownDevices(EngineState s) {
+  final byId = <String, ({String id, String name, String os})>{};
+  for (final d in [...s.peers, ...s.devices]) {
+    final id = d['id'] as String?;
+    if (id == null) continue;
+    byId.putIfAbsent(
+      id,
+      () => (
+        id: id,
+        name: d['name'] as String? ?? id,
+        os: d['os'] as String? ?? '',
+      ),
+    );
+  }
+  return byId.values.toList();
+}
+
+/// Mac: open at login, via macOS's own login items.
+class _LaunchAtLoginTile extends StatefulWidget {
+  const _LaunchAtLoginTile();
+
+  @override
+  State<_LaunchAtLoginTile> createState() => _LaunchAtLoginTileState();
+}
+
+class _LaunchAtLoginTileState extends State<_LaunchAtLoginTile> {
+  bool? _on;
+  var _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    MacBridge.launchAtLogin().then((v) {
+      if (!mounted) return;
+      setState(() {
+        _on = v;
+        _loaded = true;
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loaded && _on == null) return const SizedBox.shrink();
+    return SwitchListTile(
+      secondary: const Icon(Icons.login),
+      title: const Text('Open at login'),
+      subtitle: const Text('Starts PhotoBridge when you log in to this Mac.'),
+      value: _on ?? false,
+      onChanged: !_loaded
+          ? null
+          : (v) async {
+              try {
+                final now = await MacBridge.setLaunchAtLogin(v);
+                if (mounted) setState(() => _on = now);
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context)
+                      .showSnackBar(SnackBar(content: Text('$e')));
+                }
+              }
+            },
+    );
   }
 }
 

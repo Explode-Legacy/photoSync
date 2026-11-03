@@ -24,18 +24,25 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
-      # Sign with the same key as the installed app, so the APK installs
-      # over it as an update.
+      # The release key (see android/app/build.gradle.kts). Without it the
+      # APK is signed with a throwaway key and won't update installed copies.
       - name: Restore signing key
         env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE }}
+          KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "::warning::ANDROID_DEBUG_KEYSTORE is not set; this APK won't install over an existing copy."
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            # Never publish a release signed with the wrong key.
+            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+              echo "::error::ANDROID_RELEASE_KEYSTORE / ANDROID_RELEASE_PASSWORD secrets are missing."
+              exit 1
+            fi
+            echo "::warning::Release key secrets are not set; this APK won't install over an existing copy."
             exit 0
           fi
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/signing.keystore"
-          echo "PB_KEYSTORE=$RUNNER_TEMP/signing.keystore" >> "$GITHUB_ENV"
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "PB_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          echo "PB_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
       - run: flutter pub get
       - run: flutter test
       - run: flutter build apk --release
@@ -46,7 +53,7 @@ jobs:
         run: |
           apksigner=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner
           "$apksigner" verify --print-certs PhotoBridge.apk | tee certs.txt
-          grep -q e4ad90903c06522bec4bd5ca8efc0f2a3d73d558d3aa9f4ae1f9cd168c9beb20 certs.txt
+          grep -q d84048e347b99d04057e52381b3add6aa62fe004e5d65f83b2127fd1276bfb47 certs.txt
       - uses: actions/upload-artifact@v5
         with:
           name: PhotoBridge.apk
@@ -114,3 +121,18 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "PhotoBridge ${GITHUB_REF_NAME#v}" \
             --generate-notes
+      # The app checks this public repository for updates (the source
+      # repository is private). Needs a token allowed to create releases there.
+      - name: Publish to the public downloads page
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASES_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::PUBLIC_RELEASES_TOKEN is not set; skipping the public downloads page."
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            PhotoBridge.apk PhotoBridge.ipa PhotoBridge-macOS.dmg \
+            --repo Explode-Legacy/photoSync-releases \
+            --title "PhotoBridge ${GITHUB_REF_NAME#v}" \
+            --notes "PhotoBridge ${GITHUB_REF_NAME#v}. See the README for install steps."

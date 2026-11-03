@@ -2,11 +2,16 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:photobridge/core/client.dart';
+import 'package:photobridge/core/crypto.dart';
 import 'package:photobridge/core/folder_library.dart';
 import 'package:photobridge/core/protocol.dart';
 import 'package:photobridge/core/scanner.dart';
 import 'package:photobridge/core/server.dart';
 import 'package:photobridge/core/settings.dart';
+
+/// Few PBKDF2 rounds keep tests fast; the app uses 600k.
+Future<PairKeys> testKeys(String code) =>
+    PairKeys.forCode(code, iterations: 10);
 
 void main() {
   group('parseAddress', () {
@@ -70,8 +75,8 @@ void main() {
       key = 'SECRET12';
       server = ReceiveServer(
         selfInfo: () => {'id': 'recv', 'name': 'Pixel', 'os': 'android'},
-        currentKey: () => 'SECRET12',
-        alreadyHave: (s, a) => have.contains('$s|$a'),
+        keys: () => testKeys('SECRET12'),
+        alreadyHave: (s, a) async => have.contains('$s|$a'),
         onFile: (f) async {
           received[f.name] = await f.file.readAsBytes();
           incoming.add(f);
@@ -87,7 +92,11 @@ void main() {
         tempRoot: tmp,
       );
       await server.start();
-      client = PeerClient(selfId: 'send', key: () => key, selfPort: () => 4242);
+      client = PeerClient(
+        selfId: 'send',
+        keys: () => testKeys(key),
+        selfPort: () => 4242,
+      );
     });
 
     tearDown(() async {
@@ -146,6 +155,51 @@ void main() {
       );
     });
 
+    test('an interrupted upload resumes where it stopped', () async {
+      final info = await client.probe('127.0.0.1', server.port);
+      final peer = Peer(info!, '127.0.0.1', server.port);
+      final src = File('${tmp.path}/big.mov')
+        ..writeAsBytesSync(List.generate(5 * kChunkSize + 123, (i) => i % 241));
+      Future<String> send({int? failAt}) => client.upload(
+        peer,
+        assetId: 'BIG',
+        file: src,
+        name: 'big.mov',
+        kind: 'video',
+        created: DateTime.fromMillisecondsSinceEpoch(1700000000000),
+        location: (12.9716, 77.5946),
+        onProgress: (sent, _) {
+          if (failAt != null && sent >= failAt) throw StateError('drop');
+        },
+      );
+
+      await expectLater(send(failAt: 3 * kChunkSize), throwsA(anything));
+      // Let the receiver notice the dropped connection.
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect((await client.status(peer, 'BIG')).offset, greaterThan(0));
+      receiving.clear();
+      expect(await send(), 'saved');
+      // The second attempt didn't start from zero.
+      expect(receiving.first.$1, greaterThan(kChunkSize));
+      expect(received['big.mov'], src.readAsBytesSync());
+    });
+
+    test(
+      'wrong codes get locked out; unsigned replies are untrusted',
+      () async {
+        key = 'WRONG999';
+        for (var i = 0; i < 5; i++) {
+          expect(
+            (await client.probe('127.0.0.1', server.port))!.paired,
+            isFalse,
+          );
+        }
+        // Locked out now, even with the right code, for a minute.
+        key = 'SECRET12';
+        expect(await client.probe('127.0.0.1', server.port), isNull);
+      },
+    );
+
     test('files keep their folder, which cannot escape', () async {
       final info = await client.probe('127.0.0.1', server.port);
       final peer = Peer(info!, '127.0.0.1', server.port);
@@ -186,14 +240,14 @@ void main() {
         'os': 'macos',
         'inbound': false,
       },
-      currentKey: () => 'SECRET12',
-      alreadyHave: (_, _) => false,
+      keys: () => testKeys('SECRET12'),
+      alreadyHave: (_, _) async => false,
       acceptsPhotos: () => false,
       onFile: (f) async => got.add(f.kind),
       tempRoot: tmp,
     );
     await server.start();
-    final client = PeerClient(selfId: 'send', key: () => 'SECRET12');
+    final client = PeerClient(selfId: 'send', keys: () => testKeys('SECRET12'));
     try {
       final info = await client.probe('127.0.0.1', server.port);
       expect(info!.inbound, isFalse);
@@ -267,4 +321,39 @@ void main() {
       }
     },
   );
+
+  test('Mac folders become albums; dates are repaired by name', () async {
+    final root = await Directory.systemTemp.createTemp('pbalbum');
+    try {
+      final lib = FolderLibrary(() => root.path);
+      Directory('${root.path}/Goa trip').createSync();
+      final inAlbum = File('${root.path}/Goa trip/a.jpg')
+        ..writeAsBytesSync([1]);
+      final loose = File('${root.path}/b.jpg')..writeAsBytesSync([1]);
+      expect(await lib.albumsFor({inAlbum.path, loose.path}), {
+        inAlbum.path: 'Goa trip',
+      });
+
+      final taken = DateTime(2025, 12, 24, 18, 5);
+      final fixed = await lib.repairDates([
+        (name: 'A.JPG', created: taken, location: null),
+        (name: 'missing.jpg', created: taken, location: null),
+      ]);
+      expect(fixed, 1);
+      expect(inAlbum.lastModifiedSync(), taken);
+      // Saving into an album makes the folder.
+      final src = File('${root.path}/../src-${root.path.hashCode}.jpg')
+        ..writeAsBytesSync([2]);
+      final id = await lib.save(
+        src,
+        name: 'c.jpg',
+        kind: 'image',
+        album: 'Goa trip',
+      );
+      expect(id, '${root.path}/Goa trip/c.jpg');
+      src.deleteSync();
+    } finally {
+      await root.delete(recursive: true);
+    }
+  });
 }

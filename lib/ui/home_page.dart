@@ -3,12 +3,15 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:photo_manager/photo_manager.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/settings.dart';
 import '../core/shared_inbox.dart';
 import '../core/sync_client.dart';
+import '../core/updates.dart';
 import 'devices_page.dart';
 import 'format.dart';
+import 'history_page.dart';
 import 'picker_page.dart';
 import 'send_files.dart';
 import 'settings_page.dart';
@@ -25,6 +28,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   SyncClient get c => widget.client;
   final _shared = SharedInbox();
+  Update? _update;
 
   @override
   void initState() {
@@ -32,6 +36,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _shared.addListener(_onShared);
     _shared.start();
+    Updates.check().then((u) {
+      if (mounted) setState(() => _update = u);
+    });
   }
 
   @override
@@ -69,6 +76,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             title: const Text('PhotoBridge'),
             actions: [
               IconButton(
+                tooltip: 'Received',
+                icon: const Icon(Icons.history),
+                onPressed: () => _open(HistoryPage(client: c)),
+              ),
+              IconButton(
                 tooltip: 'Devices',
                 icon: const Icon(Icons.devices_other_outlined),
                 onPressed: () => _open(DevicesPage(client: c)),
@@ -87,6 +99,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
                     children: [
+                      if (_update case final u?)
+                        _UpdateBanner(
+                          update: u,
+                          onDismiss: () => setState(() => _update = null),
+                        ),
                       if (!s.hasPhotoAccess) _PermissionBanner(client: c),
                       _ConnectionCard(
                         state: s,
@@ -124,6 +141,45 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
       },
     );
+  }
+}
+
+class _UpdateBanner extends StatelessWidget {
+  const _UpdateBanner({required this.update, required this.onDismiss});
+
+  final Update update;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: Theme.of(context).colorScheme.secondaryContainer,
+      child: ListTile(
+        leading: const Icon(Icons.system_update_outlined),
+        title: Text('PhotoBridge ${update.version} is available'),
+        subtitle: Text(
+          Platform.isIOS
+              ? 'Download the IPA, then install it with SideStore.'
+              : Platform.isMacOS
+              ? 'Download the DMG and replace the app in Applications.'
+              : 'Download the APK and install it over this one.',
+        ),
+        onTap: () => _openUrl(update.page),
+        trailing: IconButton(
+          tooltip: 'Later',
+          icon: const Icon(Icons.close),
+          onPressed: onDismiss,
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> _openUrl(Uri url) async {
+  if (Platform.isMacOS) {
+    await Process.run('open', [url.toString()]);
+  } else {
+    await launchUrl(url, mode: LaunchMode.externalApplication);
   }
 }
 

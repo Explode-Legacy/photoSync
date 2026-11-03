@@ -1,3 +1,4 @@
+import AVFoundation
 import BackgroundTasks
 import Flutter
 import UIKit
@@ -49,6 +50,7 @@ final class ContinuedSync {
   private static let identifierPrefix = "com.photobridge.app5ymxh.continued"
 
   private var channel: FlutterMethodChannel?
+  private let keepAlive = KeepAlive()
   private var legacyTask: UIBackgroundTaskIdentifier = .invalid
   private var total: Int64 = 0
   private var done: Int64 = 0
@@ -70,6 +72,8 @@ final class ContinuedSync {
         )
       case "end":
         self.end(sent: (args["sent"] as? NSNumber)?.intValue ?? 0)
+      case "keepAlive":
+        (args["on"] as? Bool ?? false) ? self.keepAlive.start() : self.keepAlive.stop()
       default:
         return result(FlutterMethodNotImplemented)
       }
@@ -269,5 +273,65 @@ final class FilesBridge: NSObject, UIDocumentPickerDelegate, FlutterSceneLifeCyc
     var vc = (windows.first(where: \.isKeyWindow) ?? windows.first)?.rootViewController
     while let presented = vc?.presentedViewController { vc = presented }
     return vc
+  }
+}
+
+/// "Keep running in background": plays silence (mixed with other apps'
+/// audio, so music isn't interrupted), which iOS treats as an audio app and
+/// doesn't suspend. Only possible because PhotoBridge is sideloaded; it
+/// costs some battery. iOS can still end it (low memory, reboot).
+final class KeepAlive {
+  private var engine: AVAudioEngine?
+  private var observers: [NSObjectProtocol] = []
+
+  func start() {
+    guard engine == nil else { return }
+    let session = AVAudioSession.sharedInstance()
+    do {
+      try session.setCategory(.playback, options: [.mixWithOthers])
+      try session.setActive(true)
+      let engine = AVAudioEngine()
+      let player = AVAudioPlayerNode()
+      engine.attach(player)
+      let format = engine.mainMixerNode.outputFormat(forBus: 0)
+      engine.connect(player, to: engine.mainMixerNode, format: format)
+      // One second of silence, looped.
+      guard let buffer = AVAudioPCMBuffer(
+        pcmFormat: format, frameCapacity: AVAudioFrameCount(format.sampleRate))
+      else { return }
+      buffer.frameLength = buffer.frameCapacity
+      try engine.start()
+      player.scheduleBuffer(buffer, at: nil, options: .loops)
+      player.play()
+      self.engine = engine
+    } catch {
+      return
+    }
+    // Calls, Siri and other apps' audio interrupt us; start again after.
+    let center = NotificationCenter.default
+    observers.append(center.addObserver(
+      forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+    ) { [weak self] note in
+      guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+        AVAudioSession.InterruptionType(rawValue: raw) == .ended
+      else { return }
+      self?.restart()
+    })
+    observers.append(center.addObserver(
+      forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main
+    ) { [weak self] _ in self?.restart() })
+  }
+
+  func stop() {
+    observers.forEach(NotificationCenter.default.removeObserver)
+    observers = []
+    engine?.stop()
+    engine = nil
+    try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+  }
+
+  private func restart() {
+    stop()
+    start()
   }
 }

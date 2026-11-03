@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'dart:ui';
+
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'engine.dart';
@@ -47,6 +49,8 @@ Future<void> startAndroidService() async {
 
 @pragma('vm:entry-point')
 void androidServiceEntryPoint() {
+  // Registers Dart-side plugins (native AES-GCM/PBKDF2) in this isolate.
+  DartPluginRegistrant.ensureInitialized();
   FlutterForegroundTask.setTaskHandler(_EngineTask());
 }
 

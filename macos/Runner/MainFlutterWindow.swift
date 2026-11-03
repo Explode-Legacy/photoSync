@@ -10,6 +10,7 @@ class MainFlutterWindow: NSWindow {
 
     RegisterGeneratedPlugins(registry: flutterViewController)
     SharedFiles.shared.attach(messenger: flutterViewController.engine.binaryMessenger)
+    MacBridge.shared.attach(messenger: flutterViewController.engine.binaryMessenger)
 
     super.awakeFromNib()
   }

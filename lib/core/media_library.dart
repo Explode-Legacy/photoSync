@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:native_exif/native_exif.dart';
 import 'package:photo_manager/photo_manager.dart';
 
+import 'server.dart' show DateFix;
+
 /// A photo/video exported to a readable file for upload.
 class ExportedAsset {
   ExportedAsset(this.file, this.name, this.kind);
@@ -49,18 +51,34 @@ abstract class PhotoSource {
 
   Future<List<SourceItem>> byIds(List<String> ids);
 
+  /// Whether a photo saved earlier (by [save]) is still there.
+  Future<bool> exists(String id);
+
+  /// The album (Android/Mac: folder) each of [ids] is in, when it has one.
+  Future<Map<String, String>> albumsFor(Set<String> ids);
+
+  /// Applies corrected capture dates to photos received earlier, matched by
+  /// file name, where the file has no date of its own. Returns how many
+  /// changed.
+  Future<int> repairDates(List<DateFix> fixes);
+
   /// Frees any temporary copies made by [SourceItem.export].
   Future<void> releaseExports();
 
-  /// Saves a received photo or video and returns its new id.
+  /// Saves a received photo or video (into [album], if given) and returns
+  /// its new id.
   Future<String> save(
     File file, {
     required String name,
     required String kind,
     DateTime? created,
     (double, double)? location,
+    String album = '',
   });
 }
+
+/// Ids of a Live Photo's video part: the photo's id plus this.
+const kLiveSuffix = '#live';
 
 /// Thin wrapper around photo_manager for reading and saving media.
 class MediaLibrary implements PhotoSource {
@@ -109,14 +127,32 @@ class MediaLibrary implements PhotoSource {
     required bool includeVideos,
   }) async => [
     for (final a in await assetsSince(since, includeVideos: includeVideos))
-      _item(a),
+      ..._items(a, includeVideos: includeVideos),
   ];
 
   @override
   Future<List<SourceItem>> byIds(List<String> ids) async => [
     for (final id in ids)
-      if (await AssetEntity.fromId(id) case final a?) _item(a),
+      if (await AssetEntity.fromId(_baseId(id)) case final a?)
+        id.endsWith(kLiveSuffix) ? _liveItem(a) : _item(a),
   ];
+
+  @override
+  Future<bool> exists(String id) async =>
+      await AssetEntity.fromId(_baseId(id)) != null;
+
+  static String _baseId(String id) => id.endsWith(kLiveSuffix)
+      ? id.substring(0, id.length - kLiveSuffix.length)
+      : id;
+
+  /// The photo, plus its video part when it's a Live Photo (iPhone).
+  Iterable<SourceItem> _items(
+    AssetEntity a, {
+    required bool includeVideos,
+  }) sync* {
+    yield _item(a);
+    if (includeVideos && Platform.isIOS && a.isLivePhoto) yield _liveItem(a);
+  }
 
   SourceItem _item(AssetEntity a) => SourceItem(
     id: a.id,
@@ -125,6 +161,62 @@ class MediaLibrary implements PhotoSource {
     location: _locationOf(a),
     export: () => export(a),
   );
+
+  /// A Live Photo's motion part, sent as a video named like the photo.
+  SourceItem _liveItem(AssetEntity a) {
+    final title = a.title ?? a.id;
+    final dot = title.lastIndexOf('.');
+    final name = '${dot > 0 ? title.substring(0, dot) : title}.MOV';
+    return SourceItem(
+      id: '${a.id}$kLiveSuffix',
+      title: name,
+      created: a.createDateTime,
+      location: _locationOf(a),
+      export: () async {
+        final f = await a.originFileWithSubtype;
+        return f == null ? null : ExportedAsset(f, name, 'video');
+      },
+    );
+  }
+
+  @override
+  Future<Map<String, String>> albumsFor(Set<String> ids) async {
+    final wanted = {for (final id in ids) _baseId(id)};
+    final found = <String, String>{};
+    try {
+      final paths = await PhotoManager.getAssetPathList(
+        hasAll: false,
+        // iPhone: only albums the user made, not Recents/Favorites/...
+        pathFilterOption: const PMPathFilter(
+          darwin: PMDarwinPathFilter(
+            type: [PMDarwinAssetCollectionType.album],
+            subType: [PMDarwinAssetCollectionSubtype.albumRegular],
+          ),
+        ),
+      );
+      for (final path in paths) {
+        // Android folders that aren't albums in any useful sense.
+        if (const {'Camera', 'PhotoBridge', 'DCIM'}.contains(path.name)) {
+          continue;
+        }
+        final count = await path.assetCountAsync;
+        for (var start = 0; start < count; start += _pageSize) {
+          final page = await path.getAssetListRange(
+            start: start,
+            end: (start + _pageSize).clamp(0, count),
+          );
+          for (final a in page) {
+            if (wanted.contains(a.id)) found.putIfAbsent(a.id, () => path.name);
+          }
+          if (found.length == wanted.length) break;
+        }
+        if (found.length == wanted.length) break;
+      }
+    } catch (_) {
+      // Albums are a nicety; send without them.
+    }
+    return {for (final id in ids) id: ?found[_baseId(id)]};
+  }
 
   /// Photos says 0,0 when an asset has no location.
   static (double, double)? _locationOf(AssetEntity asset) {
@@ -181,23 +273,25 @@ class MediaLibrary implements PhotoSource {
     required String kind,
     DateTime? created,
     (double, double)? location,
+    String album = '',
   }) async {
     if (Platform.isAndroid && kind == 'image') {
       await _stampExif(file.path, created, location);
     }
+    final sub = album.isEmpty ? '' : '/$album';
     AssetEntity entity;
     if (kind == 'video') {
       entity = await PhotoManager.editor.saveVideo(
         file,
         title: name,
-        relativePath: 'Movies/PhotoBridge',
+        relativePath: 'Movies/PhotoBridge$sub',
         creationDate: created,
       );
     } else {
       entity = await PhotoManager.editor.saveImageWithPath(
         file.path,
         title: name,
-        relativePath: 'Pictures/PhotoBridge',
+        relativePath: 'Pictures/PhotoBridge$sub',
         creationDate: created,
         latitude: location?.$1,
         longitude: location?.$2,
@@ -213,7 +307,78 @@ class MediaLibrary implements PhotoSource {
         );
       } catch (_) {}
     }
+    if (Platform.isIOS && album.isNotEmpty) await _addToAlbum(entity, album);
     return entity.id;
+  }
+
+  /// iPhone: puts a received photo into the sender's album, creating it.
+  Future<void> _addToAlbum(AssetEntity entity, String album) async {
+    try {
+      final albums = await PhotoManager.getAssetPathList(
+        hasAll: false,
+        pathFilterOption: const PMPathFilter(
+          darwin: PMDarwinPathFilter(
+            type: [PMDarwinAssetCollectionType.album],
+            subType: [PMDarwinAssetCollectionSubtype.albumRegular],
+          ),
+        ),
+      );
+      final target =
+          albums.where((p) => p.name == album).firstOrNull ??
+          await PhotoManager.editor.darwin.createAlbum(album);
+      if (target != null) {
+        await PhotoManager.editor.copyAssetToPath(
+          asset: entity,
+          pathEntity: target,
+        );
+      }
+    } catch (_) {
+      // The photo is saved either way.
+    }
+  }
+
+  @override
+  Future<int> repairDates(List<DateFix> fixes) async {
+    // Only Android keeps the file's own (missing) date; iPhone saves with
+    // the date it was given.
+    if (!Platform.isAndroid || fixes.isEmpty) return 0;
+    final byName = {for (final f in fixes) f.name.toLowerCase(): f};
+    final filter = CustomFilter.sql(
+      where: "relative_path LIKE 'Pictures/PhotoBridge%'",
+    );
+    final count = await PhotoManager.getAssetCount(
+      filterOption: filter,
+      type: RequestType.image,
+    );
+    var fixed = 0;
+    for (var start = 0; start < count; start += _pageSize) {
+      final page = await PhotoManager.getAssetListRange(
+        start: start,
+        end: (start + _pageSize).clamp(0, count),
+        filterOption: filter,
+        type: RequestType.image,
+      );
+      for (final a in page) {
+        final fix = byName[(a.title ?? '').toLowerCase()];
+        if (fix == null) continue;
+        if (a.createDateTime.difference(fix.created).abs() <
+            const Duration(minutes: 1)) {
+          continue;
+        }
+        final file = await a.originFile;
+        if (file == null) continue;
+        // Camera photos have their own EXIF date, which is right: leave them.
+        if (!await _stampExif(file.path, fix.created, fix.location)) continue;
+        try {
+          await PhotoManager.editor.android.updateCreationDate(
+            entity: a,
+            creationDate: fix.created,
+          );
+          fixed++;
+        } catch (_) {}
+      }
+    }
+    return fixed;
   }
 
   /// Formats Android's ExifInterface can write.
@@ -224,13 +389,15 @@ class MediaLibrary implements PhotoSource {
 
   /// Fills in the capture date and GPS when the image lacks them. Existing
   /// values (e.g. camera photos) are never touched.
-  Future<void> _stampExif(
+  /// Returns true when the date was missing and has been written.
+  Future<bool> _stampExif(
     String path,
     DateTime? created,
     (double, double)? location,
   ) async {
-    if (!_exifWritable.hasMatch(path)) return;
-    if (created == null && location == null) return;
+    if (!_exifWritable.hasMatch(path)) return false;
+    if (created == null && location == null) return false;
+    var wroteDate = false;
     Exif? exif;
     try {
       exif = await Exif.fromPath(path);
@@ -242,6 +409,7 @@ class MediaLibrary implements PhotoSource {
         values['DateTimeDigitized'] = stamp;
         values['DateTime'] = stamp;
         values['OffsetTimeOriginal'] = _exifOffset(local.timeZoneOffset);
+        wroteDate = true;
       }
       if (location case (final lat, final lng)
           when await exif.getLatLong() == null) {
@@ -251,9 +419,11 @@ class MediaLibrary implements PhotoSource {
       if (values.isNotEmpty) await exif.writeAttributes(values);
     } catch (_) {
       // Unreadable metadata: save the file as it is.
+      wroteDate = false;
     } finally {
       await exif?.close();
     }
+    return wroteDate;
   }
 
   static String _two(int v) => v.toString().padLeft(2, '0');

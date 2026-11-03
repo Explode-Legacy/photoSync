@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -16,6 +17,8 @@ const kIosProcessingTask = 'com.photobridge.app5ymxh.processing';
 void iosBackgroundDispatcher() {
   Workmanager().executeTask((task, _) async {
     WidgetsFlutterBinding.ensureInitialized();
+    // Registers Dart-side plugins (native AES-GCM/PBKDF2) in this isolate.
+    DartPluginRegistrant.ensureInitialized();
     // App refresh gets ~30s in total; processing tasks (idle/charging) get
     // minutes. Leave headroom so iOS doesn't kill us mid-file.
     final budget = task == kIosProcessingTask
@@ -86,6 +89,9 @@ abstract final class IosContinuedSync {
       await _channel.invokeMethod(method, args);
     } catch (_) {}
   }
+
+  /// "Keep running in background" (see KeepAlive in AppDelegate.swift).
+  static Future<void> setKeepAlive(bool on) => _invoke('keepAlive', {'on': on});
 
   static final hooks = EngineHooks(
     onSyncStart: (total) => _invoke('begin', {'total': total}),

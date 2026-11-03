@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'media_library.dart';
+import 'server.dart' show DateFix;
 
 /// The Mac's photos: a folder the user picks instead of the Photos app.
 ///
@@ -57,6 +58,41 @@ class FolderLibrary implements PhotoSource {
         _item(File(id), await File(id).lastModified()),
   ];
 
+  @override
+  Future<bool> exists(String id) => File(id).exists();
+
+  /// A photo's subfolder (relative to the root) is its album.
+  @override
+  Future<Map<String, String>> albumsFor(Set<String> ids) async {
+    final base = '${root()}/';
+    return {
+      for (final id in ids)
+        if (id.startsWith(base) && id.substring(base.length).contains('/'))
+          id: id.substring(base.length, id.lastIndexOf('/')),
+    };
+  }
+
+  /// Finder shows a file's modified time; set it to when it was taken.
+  @override
+  Future<int> repairDates(List<DateFix> fixes) async {
+    final dir = Directory(root());
+    if (fixes.isEmpty || !await dir.exists()) return 0;
+    final byName = {for (final f in fixes) f.name.toLowerCase(): f};
+    var fixed = 0;
+    await for (final e in dir.list(recursive: true, followLinks: false)) {
+      if (e is! File) continue;
+      final fix = byName[e.path.split('/').last.toLowerCase()];
+      if (fix == null) continue;
+      if ((await e.lastModified()).difference(fix.created).abs() <
+          const Duration(minutes: 1)) {
+        continue;
+      }
+      await e.setLastModified(fix.created);
+      fixed++;
+    }
+    return fixed;
+  }
+
   SourceItem _item(File f, DateTime modified) {
     final name = f.path.split('/').last;
     return SourceItem(
@@ -80,8 +116,9 @@ class FolderLibrary implements PhotoSource {
     required String kind,
     DateTime? created,
     (double, double)? location,
+    String album = '',
   }) async {
-    final dir = Directory(root());
+    final dir = Directory(album.isEmpty ? root() : '${root()}/$album');
     await dir.create(recursive: true);
     final dot = name.lastIndexOf('.');
     final stem = dot > 0 ? name.substring(0, dot) : name;
