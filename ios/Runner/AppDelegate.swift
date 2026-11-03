@@ -1,11 +1,13 @@
 import BackgroundTasks
 import Flutter
 import UIKit
+import UniformTypeIdentifiers
 import workmanager_apple
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let continued = ContinuedSync()
+  private let folderPicker = FolderPicker()
 
   override func application(
     _ application: UIApplication,
@@ -30,6 +32,9 @@ import workmanager_apple
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "PhotoBridgeBackground") {
       continued.attach(messenger: registrar.messenger())
+    }
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "PhotoBridgeFiles") {
+      folderPicker.attach(messenger: registrar.messenger())
     }
   }
 }
@@ -139,5 +144,58 @@ final class ContinuedSync {
     guard legacyTask != .invalid else { return }
     UIApplication.shared.endBackgroundTask(legacyTask)
     legacyTask = .invalid
+  }
+}
+
+/// Folder picker for "Send files → Folder…".
+///
+/// file_picker returns a picked folder's path without opening access to it,
+/// so files in iCloud Drive or other apps' folders can't be read. This keeps
+/// the security-scoped access open until the next pick.
+final class FolderPicker: NSObject, UIDocumentPickerDelegate {
+  private var pending: FlutterResult?
+  private var current: URL?
+
+  func attach(messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(name: "photobridge/files", binaryMessenger: messenger)
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self, call.method == "pickFolder" else { return result(FlutterMethodNotImplemented) }
+      self.present(result)
+    }
+  }
+
+  private func present(_ result: @escaping FlutterResult) {
+    guard pending == nil, let top = Self.topViewController() else { return result(nil) }
+    pending = result
+    let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+    picker.delegate = self
+    top.present(picker, animated: true)
+  }
+
+  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+    current?.stopAccessingSecurityScopedResource()
+    current = nil
+    guard let url = urls.first else { return finish(nil) }
+    // False for folders inside our own sandbox, which need no extra access.
+    if url.startAccessingSecurityScopedResource() { current = url }
+    finish(url.path)
+  }
+
+  func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    finish(nil)
+  }
+
+  private func finish(_ path: String?) {
+    pending?(path)
+    pending = nil
+  }
+
+  private static func topViewController() -> UIViewController? {
+    let windows = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .flatMap(\.windows)
+    var vc = (windows.first(where: \.isKeyWindow) ?? windows.first)?.rootViewController
+    while let presented = vc?.presentedViewController { vc = presented }
+    return vc
   }
 }

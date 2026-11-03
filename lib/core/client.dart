@@ -65,6 +65,9 @@ class PeerClient {
   }
 
   /// Streams [file] to [peer]. Returns `saved` or `duplicate`.
+  ///
+  /// [kind] is `image`, `video` (saved to the gallery) or `file` (saved
+  /// under [dir] in the receiver's files folder).
   Future<String> upload(
     Peer peer, {
     required String assetId,
@@ -73,6 +76,7 @@ class PeerClient {
     required String kind,
     required DateTime created,
     (double, double)? location,
+    String? dir,
     void Function(int sent, int total)? onProgress,
   }) async {
     final total = await file.length();
@@ -86,6 +90,9 @@ class PeerClient {
       ..set(Hdr.fileName, Uri.encodeComponent(name))
       ..set(Hdr.kind, kind)
       ..set(Hdr.created, created.millisecondsSinceEpoch.toString());
+    if (dir != null && dir.isNotEmpty) {
+      req.headers.set(Hdr.dir, Uri.encodeComponent(dir));
+    }
     if (location case (final lat, final lng)) {
       req.headers
         ..set(Hdr.lat, lat.toString())

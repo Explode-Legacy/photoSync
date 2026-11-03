@@ -54,11 +54,13 @@ void main() {
     late PeerClient client;
     final received = <String, List<int>>{};
     final have = <String>{};
+    final incoming = <IncomingFile>[];
     var key = 'SECRET12';
 
     setUp(() async {
       tmp = await Directory.systemTemp.createTemp('pb');
       received.clear();
+      incoming.clear();
       have.clear();
       key = 'SECRET12';
       server = ReceiveServer(
@@ -67,7 +69,9 @@ void main() {
         alreadyHave: (s, a) => have.contains('$s|$a'),
         onFile: (f) async {
           received[f.name] = await f.file.readAsBytes();
+          incoming.add(f);
           have.add('${f.senderId}|${f.assetId}');
+          if (f.kind == 'file') return;
           expect(f.kind, 'video');
           expect(f.created, DateTime.fromMillisecondsSinceEpoch(1700000000000));
           expect(f.location, (12.9716, 77.5946));
@@ -126,5 +130,34 @@ void main() {
         ),
       );
     });
+
+    test('files keep their folder, which cannot escape', () async {
+      final info = await client.probe('127.0.0.1', server.port);
+      final peer = Peer(info!, '127.0.0.1', server.port);
+      final src = File('${tmp.path}/notes.pdf')..writeAsStringSync('%PDF');
+      Future<String> send(String dir) => client.upload(
+        peer,
+        assetId: 'file:1:$dir',
+        file: src,
+        name: 'notes.pdf',
+        kind: 'file',
+        dir: dir,
+        created: DateTime(2026),
+      );
+
+      expect(await send('Trip/Day 1'), 'saved');
+      expect(await send('../../etc/.ssh'), 'saved');
+      expect(incoming.map((f) => (f.kind, f.dir, f.name)), [
+        ('file', 'Trip/Day 1', 'notes.pdf'),
+        ('file', 'etc', 'notes.pdf'),
+      ]);
+      expect(received['notes.pdf'], src.readAsBytesSync());
+    });
+  });
+
+  test('safeDir drops traversal, absolute and hidden parts', () {
+    expect(ReceiveServer.safeDir('/a/./b/../c:d/'), 'a/b/c_d');
+    expect(ReceiveServer.safeDir(r'x\\y'), 'x/y');
+    expect(ReceiveServer.safeDir(''), '');
   });
 }

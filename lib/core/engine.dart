@@ -7,6 +7,7 @@ import 'package:photo_manager/photo_manager.dart';
 
 import 'client.dart';
 import 'discovery.dart';
+import 'file_store.dart';
 import 'ledger.dart';
 import 'media_library.dart';
 import 'protocol.dart';
@@ -65,6 +66,7 @@ class SyncEngine {
   final IdLedger _imported;
 
   final MediaLibrary _library = MediaLibrary();
+  final FileStore _files = FileStore();
   late final PeerClient _client;
   ReceiveServer? _server;
   late final LanDiscovery _discovery;
@@ -284,6 +286,17 @@ class SyncEngine {
         case 'sync':
           final ids = (cmd['assetIds'] as List?)?.cast<String>();
           unawaited(syncNow(assetIds: ids));
+        case 'sendFiles':
+          unawaited(
+            sendFiles([
+              for (final f in cmd['files'] as List)
+                (
+                  path: (f as Map)['path'] as String,
+                  name: f['name'] as String,
+                  dir: f['dir'] as String? ?? '',
+                ),
+            ]),
+          );
         case 'cancel':
           _cancel = true;
           _syncAgain = false;
@@ -539,18 +552,8 @@ class SyncEngine {
         hooks.onProgress?.call(i, queue.length, asset.title ?? '');
         try {
           if (await _sendOne(target, asset, i, queue.length)) sentNow++;
-        } on TransferException catch (e) {
-          _addLog('error', e.message);
-          if (e.unauthorized) break;
-        } on IOException catch (e) {
-          // Network dropped: stop, the next probe/sync resumes from here.
-          _addLog('error', 'Connection lost: ${e.runtimeType}');
-          peer = null;
-          break;
-        } on TimeoutException {
-          _addLog('error', 'Timed out, will retry later');
-          peer = null;
-          break;
+        } on Exception catch (e) {
+          if (_stopAfter(e)) break;
         }
         if (i % 10 == 9) await _library.releaseExports();
       }
@@ -573,6 +576,108 @@ class SyncEngine {
     }
     return sentNow;
   }
+
+  /// Logs a failed transfer. Returns true when the rest of the batch
+  /// should stop (wrong pairing code, network gone); rethrows the unknown.
+  bool _stopAfter(Exception e) {
+    switch (e) {
+      case TransferException():
+        _addLog('error', e.message);
+        return e.unauthorized;
+      case IOException():
+        // Network dropped: stop, the next probe/sync resumes from here.
+        _addLog('error', 'Connection lost: ${e.runtimeType}');
+        peer = null;
+        return true;
+      case TimeoutException():
+        _addLog('error', 'Timed out, will retry later');
+        peer = null;
+        return true;
+    }
+    throw e;
+  }
+
+  /// Sends files the user picked (not photos) to the connected phone. Each
+  /// lands in the receiver's files folder under its [dir], so a picked
+  /// folder arrives with its structure intact.
+  Future<int> sendFiles(
+    List<({String path, String name, String dir})> files,
+  ) async {
+    if (files.isEmpty) return 0;
+    if (syncing) {
+      _addLog('error', 'Wait for the current transfer to finish');
+      return 0;
+    }
+    final target = peer;
+    if (target == null) {
+      _addLog('error', 'Other phone not found yet');
+      return 0;
+    }
+
+    syncing = true;
+    _cancel = false;
+    _changed();
+    var sentNow = 0;
+    final batch = _now();
+    try {
+      _addLog(
+        'info',
+        'Sending ${_countFiles(files.length)} to ${target.info.name}',
+      );
+      hooks.onSyncStart?.call(files.length);
+      for (var i = 0; i < files.length && !_cancel; i++) {
+        final f = files[i];
+        _setProgress(i, files.length, f.name, 0);
+        hooks.onProgress?.call(i, files.length, f.name);
+        final file = File(f.path);
+        if (!await file.exists()) {
+          _addLog('error', 'Could not read ${f.name}');
+          continue;
+        }
+        var lastNotify = 0;
+        try {
+          await _client.upload(
+            target,
+            // Unique per send: picking the same file again sends it again.
+            assetId: 'file:$batch:$i',
+            file: file,
+            name: f.name,
+            kind: 'file',
+            dir: f.dir,
+            created: await file.lastModified(),
+            onProgress: (sent, total) {
+              final now = _now();
+              if (now - lastNotify < 150) return;
+              lastNotify = now;
+              _setProgress(
+                i,
+                files.length,
+                f.name,
+                total == 0 ? 1 : sent / total,
+              );
+            },
+          );
+          sentNow++;
+        } on Exception catch (e) {
+          if (_stopAfter(e)) break;
+        }
+      }
+      if (sentNow > 0) {
+        _addLog('sent', 'Sent ${_countFiles(sentNow)} to ${target.info.name}');
+      }
+      if (_cancel) _addLog('info', 'Stopped');
+    } catch (e) {
+      _addLog('error', 'Sending files failed: $e');
+    } finally {
+      syncing = false;
+      _progress = null;
+      hooks.onSyncEnd?.call(sentNow);
+      _changed();
+    }
+    return sentNow;
+  }
+
+  static String _countFiles(int n) => n == 1 ? '1 file' : '$n files';
 
   void _setProgress(int done, int total, String name, double frac) {
     _progress = {'done': done, 'total': total, 'current': name, 'frac': frac};
@@ -634,6 +739,12 @@ class SyncEngine {
   // ---------------------------------------------------------------- receiving
 
   Future<void> _onIncoming(IncomingFile f) async {
+    if (f.kind == 'file') {
+      final saved = await _files.save(f.file, dir: f.dir, name: f.name);
+      receivedCount++;
+      _addLog('received', 'Received $saved');
+      return;
+    }
     if (!hasPhotoAccess) throw StateError('photo access denied');
     final localId = await _library.save(
       f.file,

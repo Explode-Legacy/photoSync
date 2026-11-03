@@ -8,6 +8,7 @@ import '../core/settings.dart';
 import '../core/sync_client.dart';
 import 'devices_page.dart';
 import 'picker_page.dart';
+import 'send_files.dart';
 import 'settings_page.dart';
 
 class HomePage extends StatefulWidget {
@@ -85,6 +86,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         client: c,
                         onChoose: () => _open(PickerPage(client: c)),
                       ),
+                      const SizedBox(height: 12),
+                      SendFilesCard(state: s, client: c),
                       const SizedBox(height: 12),
                       _ThisDeviceCard(state: s),
                       const SizedBox(height: 20),

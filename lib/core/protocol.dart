@@ -20,6 +20,10 @@ abstract final class Hdr {
   /// Capture location from the sender's library, as decimal degrees.
   static const lat = 'x-pb-lat';
   static const lng = 'x-pb-lng';
+
+  /// For `kind: file`: folder to save into, relative to the receiver's
+  /// files folder, `/`-separated and URI-encoded. Empty for loose files.
+  static const dir = 'x-pb-dir';
 }
 
 /// What another device reports about itself at `GET /info`.

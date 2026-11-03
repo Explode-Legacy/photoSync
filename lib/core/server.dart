@@ -14,6 +14,7 @@ class IncomingFile {
     required this.kind,
     required this.created,
     required this.location,
+    this.dir = '',
     required this.file,
   });
 
@@ -21,12 +22,15 @@ class IncomingFile {
   final String assetId;
   final String name;
 
-  /// `image` or `video`.
+  /// `image`, `video` or `file`.
   final String kind;
   final DateTime? created;
 
   /// (latitude, longitude) from the sender's library, if it had one.
   final (double, double)? location;
+
+  /// For files: sanitized relative folder (`a/b`), or empty.
+  final String dir;
   final File file;
 }
 
@@ -131,9 +135,17 @@ class ReceiveServer {
       return _json(req, 200, {'status': 'duplicate'});
     }
 
-    final name = _safeName(Uri.decodeComponent(h.value(Hdr.fileName) ?? ''));
+    final kind = switch (h.value(Hdr.kind)) {
+      'video' => 'video',
+      'file' => 'file',
+      _ => 'image',
+    };
+    final name = _safeName(
+      Uri.decodeComponent(h.value(Hdr.fileName) ?? ''),
+      fallback: kind == 'file' ? 'file' : 'photo.jpg',
+    );
+    final folder = safeDir(Uri.decodeComponent(h.value(Hdr.dir) ?? ''));
     final createdMs = int.tryParse(h.value(Hdr.created) ?? '');
-    final kind = h.value(Hdr.kind) == 'video' ? 'video' : 'image';
     final lat = double.tryParse(h.value(Hdr.lat) ?? '');
     final lng = double.tryParse(h.value(Hdr.lng) ?? '');
 
@@ -159,6 +171,7 @@ class ReceiveServer {
               ? null
               : DateTime.fromMillisecondsSinceEpoch(createdMs),
           location: lat == null || lng == null ? null : (lat, lng),
+          dir: folder,
           file: file,
         ),
       );
@@ -168,14 +181,28 @@ class ReceiveServer {
     }
   }
 
-  static String _safeName(String raw) {
+  static final _unsafeChars = RegExp(r'[\x00-\x1f:*?"<>|]');
+
+  static String _safeName(String raw, {required String fallback}) {
     final base = raw.split(RegExp(r'[/\\]')).last.trim();
-    final cleaned = base.replaceAll(RegExp(r'[\x00-\x1f:*?"<>|]'), '_');
+    final cleaned = base.replaceAll(_unsafeChars, '_');
     if (cleaned.isEmpty || cleaned.startsWith('.')) {
-      return 'photo_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final ms = DateTime.now().millisecondsSinceEpoch;
+      final dot = fallback.lastIndexOf('.');
+      return dot < 0
+          ? '${fallback}_$ms'
+          : '${fallback.substring(0, dot)}_$ms${fallback.substring(dot)}';
     }
     return cleaned;
   }
+
+  /// A relative folder path that can't escape the files folder: no `..`,
+  /// no absolute paths, no hidden or empty segments.
+  static String safeDir(String raw) => raw
+      .split(RegExp(r'[/\\]'))
+      .map((s) => s.trim().replaceAll(_unsafeChars, '_'))
+      .where((s) => s.isNotEmpty && !s.startsWith('.'))
+      .join('/');
 
   static Future<void> _json(HttpRequest req, int status, Object body) async {
     req.response
