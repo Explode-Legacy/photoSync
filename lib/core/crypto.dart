@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:cryptography/dart.dart';
 
 /// Keys for one secure channel between two devices: a signing key for
 /// requests and replies, and an encryption key from which each request
@@ -73,8 +75,25 @@ abstract final class CodeSecret {
     String code, {
     int iterations = defaultIterations,
   }) => _cache.putIfAbsent('$iterations:$code', () async {
+    // Android has a native PBKDF2. Elsewhere it's pure Dart and takes
+    // seconds: run it off the UI isolate so the app (and its server) stay
+    // responsive meanwhile.
+    if (Platform.isAndroid) return _stretch(code, iterations, Pbkdf2.new);
+    return Isolate.run(() => _stretch(code, iterations, DartPbkdf2.new));
+  });
+
+  static Future<List<int>> _stretch(
+    String code,
+    int iterations,
+    Pbkdf2 Function({
+      required MacAlgorithm macAlgorithm,
+      required int iterations,
+      required int bits,
+    })
+    make,
+  ) async {
     final key =
-        await Pbkdf2(
+        await make(
           macAlgorithm: Hmac.sha256(),
           iterations: iterations,
           bits: 320,
@@ -83,7 +102,7 @@ abstract final class CodeSecret {
           nonce: utf8.encode('photobridge/v3/pairing'),
         );
     return key.extractBytes();
-  });
+  }
 }
 
 /// Random bytes, base64url-encoded (salts and request nonces).

@@ -22,8 +22,27 @@ class FileSender {
   /// (see FolderPicker in AppDelegate.swift).
   static const _channel = MethodChannel('photobridge/files');
 
-  Future<void> pickFiles(BuildContext context) async {
-    final picked = await FilePicker.pickFiles();
+  Future<void> pickFiles(BuildContext context) =>
+      _pick(context, FilePicker.pickFiles());
+
+  /// Photos and videos from the gallery, sent as files (originals: no
+  /// HEIC→JPEG or video conversion).
+  Future<void> pickPhotos(BuildContext context) => _pick(
+    context,
+    FilePicker.pickFiles(
+      type: FileType.media,
+      darwinOptions: const DarwinOptions(
+        assetRepresentationMode: DarwinAssetRepresentationMode.current,
+        orderedSelection: false,
+      ),
+    ),
+  );
+
+  Future<void> _pick(
+    BuildContext context,
+    Future<List<PlatformFile>> picking,
+  ) async {
+    final picked = await picking;
     final files = <PickedFile>[
       for (final f in picked)
         if (f.path case final path?)
@@ -247,13 +266,27 @@ class SendFilesCard extends StatelessWidget {
             Text('Send files', style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: 4),
             Text(
-              'Any file or folder, sent once. Files you receive are in '
+              'Photos, files or folders, sent once as files (not synced). '
+              'What you receive is in '
               '$location.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 16),
             Row(
               children: [
+                // The Mac has no photo library here; it uses Files/Folder.
+                if (!Platform.isMacOS) ...[
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: enabled
+                          ? () => sender.pickPhotos(context)
+                          : null,
+                      icon: const Icon(Icons.photo_library_outlined),
+                      label: const Text('Photos…'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: enabled ? () => sender.pickFiles(context) : null,
@@ -261,7 +294,7 @@ class SendFilesCard extends StatelessWidget {
                     label: const Text('Files…'),
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 8),
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: enabled

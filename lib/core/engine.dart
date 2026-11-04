@@ -133,11 +133,21 @@ class SyncEngine {
   /// the background on its own; background tasks start it explicitly.
   bool appInForeground = true;
 
+  /// Last pairing problem logged per device, so it's logged once.
+  final Map<String, String> _pairProblems = {};
+
   /// Fingerprints of trusted devices' keys, for the UI.
   final Map<String, String> _fingerprints = {};
 
   /// Where paired devices last reached us from, by device id.
   final Map<String, ({String host, int port, DateTime seen})> _contacts = {};
+
+  /// Files waiting for devices that weren't connected (from the Share
+  /// extension), sent when they connect.
+  final List<
+    ({List<({String path, String name, String dir})> files, Set<String> to})
+  >
+  _queuedFiles = [];
 
   /// Why auto-send last waited (Wi-Fi only, low battery), to log it once.
   String? _lastBlock;
@@ -192,6 +202,7 @@ class SyncEngine {
       trusted: settings.trustedDevice,
       pairingCode: _stretchedCode,
       onPaired: _onPaired,
+      onPairProblem: _onPairProblem,
       selfPort: () => port,
     );
     _discovery = LanDiscovery(selfId: settings.deviceId);
@@ -380,14 +391,18 @@ class SyncEngine {
           unawaited(syncNow(assetIds: ids));
         case 'sendFiles':
           unawaited(
-            sendFiles(to: (cmd['to'] as List?)?.cast<String>(), [
-              for (final f in cmd['files'] as List)
-                (
-                  path: (f as Map)['path'] as String,
-                  name: f['name'] as String,
-                  dir: f['dir'] as String? ?? '',
-                ),
-            ]),
+            sendFiles(
+              to: (cmd['to'] as List?)?.cast<String>(),
+              wait: cmd['wait'] == true,
+              [
+                for (final f in cmd['files'] as List)
+                  (
+                    path: (f as Map)['path'] as String,
+                    name: f['name'] as String,
+                    dir: f['dir'] as String? ?? '',
+                  ),
+              ],
+            ),
           );
         case 'cancel':
           _cancel = true;
@@ -408,6 +423,10 @@ class SyncEngine {
           await settings.setSyncKey(generatePairingCode());
           await _forgetAll();
           _addLog('info', 'New pairing code: other devices are unpaired');
+          await _probe();
+        case 'pairNow':
+          _client.retryPairing(cmd['id'] as String?);
+          _pairProblems.clear();
           await _probe();
         case 'forgetDevice':
           final id = cmd['id'] as String;

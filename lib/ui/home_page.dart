@@ -36,6 +36,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _shared.addListener(_onShared);
     _shared.start();
+    c.addListener(_publishDevices);
     Updates.check().then((u) {
       if (mounted) setState(() => _update = u);
     });
@@ -44,14 +45,54 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    c.removeListener(_publishDevices);
     _shared.dispose();
     super.dispose();
   }
 
-  /// Something was shared to PhotoBridge: ask where to send it.
+  /// Something was shared to PhotoBridge: ask where to send it, or, from
+  /// the iPhone Share extension (devices already chosen), just send it.
   void _onShared() {
-    if (!_shared.hasFiles || !mounted) return;
-    FileSender(c).sendShared(context, _shared.take());
+    if (!mounted) return;
+    for (final job in _shared.takeJobs()) {
+      c.send('sendFiles', {
+        'to': job.to,
+        'wait': true,
+        'files': [
+          for (final p in job.paths)
+            {'path': p, 'name': p.split('/').last, 'dir': ''},
+        ],
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Sending ${job.paths.length} shared items')),
+      );
+    }
+    if (_shared.hasFiles) FileSender(c).sendShared(context, _shared.take());
+  }
+
+  String _publishedDevices = '';
+
+  /// iPhone: keeps the Share extension's device list current.
+  void _publishDevices() {
+    final s = c.state;
+    if (s == null || !Platform.isIOS) return;
+    final connected = {for (final p in s.peers) p['id']};
+    final os = {
+      for (final d in [...s.devices, ...s.peers]) d['id']: d['os'],
+    };
+    final list = <Map<String, Object>>[
+      for (final t in s.trusted)
+        {
+          'id': t['id'] as String,
+          'name': t['name'] as String,
+          'os': (os[t['id']] as String?) ?? '',
+          'connected': connected.contains(t['id']),
+        },
+    ];
+    final key = list.toString();
+    if (key == _publishedDevices) return;
+    _publishedDevices = key;
+    SharedInbox.publishDevices(list);
   }
 
   @override

@@ -178,11 +178,68 @@ final class FilesBridge: NSObject, UIDocumentPickerDelegate, FlutterSceneLifeCyc
       case "takeShared":
         result(self.shared + self.collectInbox())
         self.shared = []
+      case "takeOutbox":
+        result(self.collectOutbox())
+      case "publishDevices":
+        self.publishDevices(call.arguments)
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
     }
     self.channel = channel
+    listenForOutbox()
+  }
+
+  // MARK: Share extension (Photos and other apps)
+
+  /// The extension posts this after adding a job to the outbox.
+  private func listenForOutbox() {
+    CFNotificationCenterAddObserver(
+      CFNotificationCenterGetDarwinNotifyCenter(),
+      Unmanaged.passUnretained(self).toOpaque(),
+      { _, observer, _, _, _ in
+        guard let observer else { return }
+        let me = Unmanaged<FilesBridge>.fromOpaque(observer).takeUnretainedValue()
+        DispatchQueue.main.async { me.channel?.invokeMethod("sharedAvailable", arguments: nil) }
+      },
+      SharedBox.outboxNotification as CFString, nil, .deliverImmediately)
+  }
+
+  /// Paired devices for the extension's list: [{id, name, os, connected}].
+  private func publishDevices(_ args: Any?) {
+    guard let file = SharedBox.devicesFile,
+      let list = args as? [[String: Any]],
+      let data = try? JSONSerialization.data(withJSONObject: list)
+    else { return }
+    try? data.write(to: file, options: .atomic)
+  }
+
+  /// Jobs the extension left: [{to: [ids], paths: [...]}]. Each job's files
+  /// move to tmp (out of the shared folder) before Dart sends them.
+  private func collectOutbox() -> [[String: Any]] {
+    guard let outbox = SharedBox.outbox else { return [] }
+    let fm = FileManager.default
+    var jobs: [[String: Any]] = []
+    for dir in (try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil)) ?? [] {
+      let manifest = dir.appendingPathComponent("job.json")
+      guard let data = try? Data(contentsOf: manifest),
+        let job = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let names = job["files"] as? [String]
+      else { continue } // still being written
+      let dest = fm.temporaryDirectory.appendingPathComponent("shared/\(UUID().uuidString)", isDirectory: true)
+      do {
+        try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.moveItem(at: dir, to: dest)
+      } catch {
+        continue
+      }
+      jobs.append([
+        "to": job["to"] as? [String] ?? [],
+        "paths": names.map { dest.appendingPathComponent($0).path },
+      ])
+    }
+    return jobs
   }
 
   // MARK: Sharing

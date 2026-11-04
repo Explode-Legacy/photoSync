@@ -76,6 +76,7 @@ extension EnginePeers on SyncEngine {
       if (joined.isNotEmpty || (_lastBlock != null && found.isNotEmpty)) {
         unawaited(_autoSync());
       }
+      if (found.isNotEmpty) unawaited(_sendQueued());
       if (changed) _changed();
     } finally {
       _probing = false;

@@ -232,7 +232,7 @@ void main() {
       'wrong codes get locked out; unsigned replies are untrusted',
       () async {
         sender.code = 'WRONG999';
-        for (var i = 0; i < 5; i++) {
+        for (var i = 0; i < 10; i++) {
           client.dropSessions(); // skip the client's own back-off
           expect(
             (await client.probe('127.0.0.1', server.port))!.paired,

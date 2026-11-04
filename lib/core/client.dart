@@ -56,8 +56,12 @@ class PeerClient {
     required this.trusted,
     required this.pairingCode,
     required this.onPaired,
+    this.onPairProblem,
     this.selfPort,
   });
+
+  /// Pairing with a device didn't work, and why (shown in Activity).
+  final void Function(String id, String name, String reason)? onPairProblem;
 
   final String selfId;
   final String Function() selfName;
@@ -81,6 +85,16 @@ class PeerClient {
   final Map<String, _ClientSession> _sessions = {};
   final Map<String, DateTime> _pairBackoff = {};
 
+  /// One pairing at a time per device (several addresses may answer).
+  final Map<String, Future<bool>> _pairing = {};
+
+  /// Waits after a failed pairing before trying that device again.
+  static const _pairRetry = Duration(seconds: 30);
+
+  /// Pair with [peerId] (or everyone) on the next probe, without waiting.
+  void retryPairing([String? peerId]) =>
+      peerId == null ? _pairBackoff.clear() : _pairBackoff.remove(peerId);
+
   Uri _uri(String host, int port, String path) =>
       Uri(scheme: 'http', host: host, port: port, path: path);
 
@@ -99,8 +113,9 @@ class PeerClient {
     String host,
     int port,
     String path,
-    Map<String, dynamic> body,
-  ) async {
+    Map<String, dynamic> body, {
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
     final req = await _http.postUrl(_uri(host, port, path));
     req.headers
       ..contentType = ContentType.json
@@ -108,7 +123,7 @@ class PeerClient {
     final ourPort = selfPort?.call() ?? 0;
     if (ourPort > 0) req.headers.set(Hdr.port, '$ourPort');
     req.write(jsonEncode(body));
-    final res = await req.close().timeout(const Duration(seconds: 10));
+    final res = await req.close().timeout(timeout);
     final text = await utf8.decodeStream(res);
     final json = text.isEmpty
         ? <String, dynamic>{}
@@ -131,12 +146,13 @@ class PeerClient {
   /// and swaps identity keys. Returns false when the codes differ.
   Future<bool> pair(String host, int port, PeerInfo info) async {
     final a = Spake2.start(await pairingCode(), initiator: true);
+    // The other side may first have to stretch the code (seconds).
     final reply = await _postJson(host, port, '/pair', {
       'id': selfId,
       'name': selfName(),
       'pub': identity.publicKeyText,
       'share': base64Url.encode(a.message),
-    });
+    }, timeout: const Duration(seconds: 30));
     final pubB = base64Url.decode(reply['pub'] as String);
     // The key it advertised must be the one it pairs with.
     if (info.publicKey.isNotEmpty && reply['pub'] != info.publicKey) {
@@ -310,10 +326,15 @@ class PeerClient {
         if (wait != null && DateTime.now().isBefore(wait)) {
           return info.withPaired(false);
         }
-        if (!await pair(host, port, info)) {
-          _pairBackoff[info.id] = DateTime.now().add(
-            const Duration(minutes: 5),
-          );
+        final paired = await (_pairing[info.id] ??= pair(host, port, info)
+            .whenComplete(() {
+              // A block, not `=>`: returning the removed future would make
+              // whenComplete wait for itself.
+              _pairing.remove(info.id);
+            }));
+        if (!paired) {
+          _pairBackoff[info.id] = DateTime.now().add(_pairRetry);
+          onPairProblem?.call(info.id, info.name, 'different pairing code');
           return info.withPaired(false);
         }
       }
@@ -321,9 +342,12 @@ class PeerClient {
       return info.withPaired(true);
     } on TransferException catch (e) {
       if (e.unauthorized) _sessions.remove(info.id);
-      _pairBackoff[info.id] = DateTime.now().add(const Duration(minutes: 1));
+      _pairBackoff[info.id] = DateTime.now().add(_pairRetry);
+      onPairProblem?.call(info.id, info.name, e.message);
       return info.withPaired(false);
-    } catch (_) {
+    } catch (e) {
+      _pairBackoff[info.id] = DateTime.now().add(_pairRetry);
+      onPairProblem?.call(info.id, info.name, '$e');
       return info.withPaired(false);
     }
   }

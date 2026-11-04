@@ -127,7 +127,7 @@ class _DevicesPageState extends State<DevicesPage> {
         ? 'Not reachable now'
         : online
         ? 'Reachable'
-        : 'Reachable, different pairing code';
+        : 'Reachable, not paired: same pairing code on both?';
     return ListTile(
       leading: Icon(
         connected ? Icons.check_circle : Icons.bookmark,
@@ -140,10 +140,20 @@ class _DevicesPageState extends State<DevicesPage> {
       title: Text(p.label),
       subtitle: Text('${p.address} · $status'),
       onTap: () => _edit(existing: p),
-      trailing: IconButton(
-        tooltip: 'Remove',
-        icon: const Icon(Icons.delete_outline),
-        onPressed: () => c.send('removePeer', {'address': p.address}),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (online == false)
+            TextButton(
+              onPressed: () => c.send('pairNow'),
+              child: const Text('Pair now'),
+            ),
+          IconButton(
+            tooltip: 'Remove',
+            icon: const Icon(Icons.delete_outline),
+            onPressed: () => c.send('removePeer', {'address': p.address}),
+          ),
+        ],
       ),
     );
   }
@@ -166,10 +176,22 @@ class _DevicesPageState extends State<DevicesPage> {
             ? 'Update PhotoBridge there to connect'
             : 'Not paired: use the same pairing code on both'}',
       ),
-      trailing: TextButton(
-        onPressed: () =>
-            _edit(label: d['name'] as String, address: d['address'] as String),
-        child: const Text('Save'),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (!paired && d['outdated'] != true)
+            TextButton(
+              onPressed: () => c.send('pairNow', {'id': d['id']}),
+              child: const Text('Pair now'),
+            ),
+          TextButton(
+            onPressed: () => _edit(
+              label: d['name'] as String,
+              address: d['address'] as String,
+            ),
+            child: const Text('Save'),
+          ),
+        ],
       ),
     );
   }

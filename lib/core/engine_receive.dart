@@ -8,7 +8,14 @@ extension EngineReceiving on SyncEngine {
   /// The pairing code, stretched for SPAKE2 (once, then cached).
   Future<List<int>> _stretchedCode() => CodeSecret.stretch(settings.syncKey);
 
+  void _onPairProblem(String id, String name, String reason) {
+    if (_pairProblems[id] == reason) return;
+    _pairProblems[id] = reason;
+    _addLog('error', 'Couldn’t pair with $name: $reason');
+  }
+
   Future<void> _onPaired(String id, String name, List<int> publicKey) async {
+    _pairProblems.remove(id);
     await settings.trust(id, name, publicKey);
     _fingerprints[id] = await fingerprint(publicKey);
     _addLog('info', 'Paired with $name (${_fingerprints[id]})');

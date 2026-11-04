@@ -174,8 +174,29 @@ extension EngineSending on SyncEngine {
   Future<int> sendFiles(
     List<({String path, String name, String dir})> files, {
     List<String>? to,
+    bool wait = false,
   }) async {
     if (files.isEmpty) return 0;
+    // [wait]: devices not connected (or a transfer already running) get the
+    // files later instead of never.
+    if (wait && to != null) {
+      final later = {
+        for (final id in to)
+          if (syncing || !peers.containsKey(id)) id,
+      };
+      if (later.isNotEmpty) {
+        _queuedFiles.add((files: files, to: later));
+        _addLog(
+          'info',
+          '${_countFiles(files.length)} will be sent when the device connects',
+        );
+        to = [
+          for (final id in to)
+            if (!later.contains(id)) id,
+        ];
+        if (to.isEmpty) return 0;
+      }
+    }
     if (syncing) {
       _addLog('error', 'Wait for the current transfer to finish');
       return 0;
@@ -245,6 +266,27 @@ extension EngineSending on SyncEngine {
   }
 
   static String _countFiles(int n) => n == 1 ? '1 file' : '$n files';
+
+  /// Sends queued files to whichever of their devices are connected now.
+  Future<void> _sendQueued() async {
+    if (syncing || _queuedFiles.isEmpty) return;
+    final ready = [
+      for (final job in _queuedFiles)
+        (
+          job,
+          {
+            for (final id in job.to)
+              if (peers.containsKey(id)) id,
+          },
+        ),
+    ];
+    for (final (job, ids) in ready) {
+      if (ids.isEmpty) continue;
+      job.to.removeAll(ids);
+      await sendFiles(job.files, to: [...ids]);
+    }
+    _queuedFiles.removeWhere((j) => j.to.isEmpty);
+  }
 
   /// What's being sent right now, for the UI and the Android notification:
   /// item [done] of [total], [frac] of the current file, its [bytes] of

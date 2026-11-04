@@ -172,7 +172,7 @@ class ReceiveServer {
   /// locks that address out for [_lockout].
   final Map<String, List<int>> _failures = {};
   final Map<String, int> _lockedUntil = {};
-  static const _maxFailures = 5;
+  static const _maxFailures = 10;
   static const _failWindow = Duration(minutes: 1);
   static const _lockout = Duration(minutes: 1);
 

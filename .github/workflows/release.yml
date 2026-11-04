@@ -69,11 +69,18 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter build ios --release --no-codesign
-      # SideStore/AltStore sign the app themselves at install time.
+      # SideStore/AltStore sign the app themselves at install time, but they
+      # read the entitlements (the App Group the Share extension needs) from
+      # the existing signature, so sign ad hoc with them first.
       - name: Package IPA
         run: |
           mkdir Payload
           cp -R build/ios/iphoneos/Runner.app Payload/
+          app=Payload/Runner.app
+          for f in "$app"/Frameworks/*; do codesign -f -s - "$f"; done
+          codesign -f -s - --entitlements ios/ShareExtension/ShareExtension.entitlements "$app"/PlugIns/ShareExtension.appex
+          codesign -f -s - --entitlements ios/Runner/Runner.entitlements "$app"
+          codesign -d --entitlements - "$app"/PlugIns/ShareExtension.appex
           zip -qry PhotoBridge.ipa Payload
       - uses: actions/upload-artifact@v5
         with:
