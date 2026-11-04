@@ -192,7 +192,7 @@ Future<String> pairingConfirm(List<int> transcript, String role) async {
   final digest = await _sha256.hash(transcript);
   final key = await _hkdf.deriveKey(
     secretKey: SecretKey(digest.bytes),
-    nonce: const <int>[],
+    nonce: hkdfNoSalt,
     info: utf8.encode('pb3/confirm/$role'),
   );
   final mac = await _hmac.calculateMac(transcript, secretKey: key);

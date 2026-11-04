@@ -25,7 +25,7 @@ class ChannelKeys {
     final master = SecretKey(secret);
     Future<SecretKey> sub(String info) => _hkdf.deriveKey(
       secretKey: master,
-      nonce: const <int>[],
+      nonce: hkdfNoSalt,
       info: utf8.encode(info),
     );
     return ChannelKeys._(await sub('pb3/auth'), await sub('pb3/enc'));
@@ -55,6 +55,11 @@ class ChannelKeys {
 
   static final _info = utf8.encode('pb3/transfer');
 }
+
+/// HKDF's "no salt": RFC 5869 defines it as HashLen zero bytes, which gives
+/// the same keys as an empty salt (HMAC zero-pads keys). Spelled out because
+/// Android's native HMAC rejects an empty key.
+final List<int> hkdfNoSalt = List.unmodifiable(List.filled(32, 0));
 
 bool constantTimeEquals(List<int> a, List<int> b) {
   if (a.length != b.length) return false;
