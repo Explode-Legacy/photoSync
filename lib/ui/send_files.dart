@@ -276,36 +276,58 @@ class SendFilesCard extends StatelessWidget {
               children: [
                 // The Mac has no photo library here; it uses Files/Folder.
                 if (!Platform.isMacOS) ...[
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: enabled
-                          ? () => sender.pickPhotos(context)
-                          : null,
-                      icon: const Icon(Icons.photo_library_outlined),
-                      label: const Text('Photos…'),
-                    ),
+                  _SendChoice(
+                    icon: Icons.photo_library_outlined,
+                    label: 'Photos',
+                    onTap: enabled ? () => sender.pickPhotos(context) : null,
                   ),
                   const SizedBox(width: 8),
                 ],
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: enabled ? () => sender.pickFiles(context) : null,
-                    icon: const Icon(Icons.insert_drive_file_outlined),
-                    label: const Text('Files…'),
-                  ),
+                _SendChoice(
+                  icon: Icons.insert_drive_file_outlined,
+                  label: 'Files',
+                  onTap: enabled ? () => sender.pickFiles(context) : null,
                 ),
                 const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: enabled
-                        ? () => sender.pickFolder(context)
-                        : null,
-                    icon: const Icon(Icons.folder_outlined),
-                    label: const Text('Folder…'),
-                  ),
+                _SendChoice(
+                  icon: Icons.folder_outlined,
+                  label: 'Folder',
+                  onTap: enabled ? () => sender.pickFolder(context) : null,
                 ),
               ],
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One of the Send files choices: icon above label, so three fit a phone.
+class _SendChoice extends StatelessWidget {
+  const _SendChoice({required this.icon, required this.label, this.onTap});
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: OutlinedButton(
+        onPressed: onTap,
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon),
+            const SizedBox(height: 6),
+            Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
           ],
         ),
       ),
