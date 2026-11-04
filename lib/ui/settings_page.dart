@@ -126,9 +126,26 @@ class SettingsPage extends StatelessWidget {
               SwitchListTile(
                 secondary: const Icon(Icons.videocam_outlined),
                 title: const Text('Include videos'),
+                subtitle: Platform.isIOS
+                    ? const Text('Also the motion part of Live Photos')
+                    : null,
                 value: s.includeVideos,
                 onChanged: (v) => toggle('includeVideos', v),
               ),
+              if (Platform.isIOS)
+                SwitchListTile(
+                  secondary: const Icon(Icons.motion_photos_on_outlined),
+                  title: const Text('Live Photos as Motion Photos'),
+                  subtitle: Text(
+                    s.liveAsMotion
+                        ? 'One JPEG that moves in Google Photos on Android. '
+                              'Not the HEIC original.'
+                        : 'Off: the original photo (HEIC, full quality) plus '
+                              'its original video, side by side.',
+                  ),
+                  value: s.liveAsMotion,
+                  onChanged: (v) => toggle('liveAsMotion', v),
+                ),
               if (Platform.isMacOS)
                 _FolderTile(
                   icon: Icons.photo_library_outlined,

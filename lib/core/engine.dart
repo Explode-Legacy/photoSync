@@ -83,7 +83,7 @@ class SyncEngine {
 
   late final PhotoSource _library = Platform.isMacOS
       ? FolderLibrary(() => settings.photosFolder)
-      : MediaLibrary();
+      : MediaLibrary(liveAsMotion: () => settings.liveAsMotion);
   late final FileStore _files = FileStore(macRoot: () => settings.filesFolder);
   StreamSubscription<void>? _folderWatch;
   late final PeerClient _client;

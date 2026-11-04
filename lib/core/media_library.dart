@@ -115,6 +115,15 @@ Future<String?> sniffKind(File file) async {
 
 /// Thin wrapper around photo_manager for reading and saving media.
 class MediaLibrary implements PhotoSource {
+  MediaLibrary({this.liveAsMotion = _never});
+
+  static bool _never() => false;
+
+  /// iPhone Live Photos: false (default) sends the original photo untouched
+  /// plus its original video; true sends one Motion Photo JPEG instead,
+  /// which plays on Android but isn't the HEIC original.
+  final bool Function() liveAsMotion;
+
   static const _pageSize = 200;
 
   @override
@@ -163,14 +172,15 @@ class MediaLibrary implements PhotoSource {
       ..._items(a, includeVideos: includeVideos),
   ];
 
+  /// Photos picked by hand; a Live Photo brings its motion part along.
   @override
   Future<List<SourceItem>> byIds(List<String> ids) async => [
     for (final id in ids)
-      // Ids ending in [kLiveSuffix] (older versions sent the motion part
-      // separately) are now part of the photo's own Motion Photo.
-      if (!id.endsWith(kLiveSuffix))
-        if (await AssetEntity.fromId(id) case final a?)
-          Platform.isIOS && a.isLivePhoto ? _motionItem(a) : _item(a),
+      if (await AssetEntity.fromId(_baseId(id)) case final a?)
+        if (id.endsWith(kLiveSuffix))
+          _liveItem(a)
+        else
+          ..._items(a, includeVideos: true),
   ];
 
   @override
@@ -181,12 +191,49 @@ class MediaLibrary implements PhotoSource {
       ? id.substring(0, id.length - kLiveSuffix.length)
       : id;
 
-  /// The photo; a Live Photo (iPhone) goes as an Android Motion Photo.
+  /// The photo, and for a Live Photo (iPhone) its motion part: either the
+  /// original video next to it, or one Motion Photo (see [liveAsMotion]).
   Iterable<SourceItem> _items(
     AssetEntity a, {
     required bool includeVideos,
   }) sync* {
-    yield Platform.isIOS && a.isLivePhoto ? _motionItem(a) : _item(a);
+    if (!Platform.isIOS || !a.isLivePhoto) {
+      yield _item(a);
+    } else if (liveAsMotion()) {
+      yield _motionItem(a);
+    } else {
+      yield _item(a);
+      if (includeVideos) yield _liveItem(a);
+    }
+  }
+
+  /// A Live Photo's motion part as the original video file, named like the
+  /// photo (IMG_1234.HEIC → IMG_1234.MOV).
+  SourceItem _liveItem(AssetEntity a) {
+    final title = a.title ?? a.id;
+    final dot = title.lastIndexOf('.');
+    final stem = dot > 0 ? title.substring(0, dot) : title;
+    return SourceItem(
+      id: '${a.id}$kLiveSuffix',
+      title: '$stem.MOV',
+      created: a.createDateTime,
+      location: _locationOf(a),
+      export: () async {
+        // The plugin's file cache can answer with the still photo it just
+        // exported for this asset; start clean, and check what we got.
+        await PhotoManager.clearFileCache();
+        for (final (type, ext) in [
+          (PMDarwinAVFileType.mov, 'MOV'),
+          (PMDarwinAVFileType.mp4, 'MP4'),
+        ]) {
+          final f = await a.loadFile(withSubtype: true, darwinFileType: type);
+          if (f != null && await sniffKind(f) == 'video') {
+            return ExportedAsset(f, '$stem.$ext', 'video');
+          }
+        }
+        return null;
+      },
+    );
   }
 
   SourceItem _item(AssetEntity a) => SourceItem(

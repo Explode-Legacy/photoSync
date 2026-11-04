@@ -126,6 +126,10 @@ class AppSettings {
   /// Pause auto-send below 15% battery unless charging (Android).
   bool get lowBatteryPause => _p.getBool('lowBatteryPause') ?? true;
 
+  /// iPhone: send Live Photos as Motion Photo JPEGs (they move on Android)
+  /// instead of the original HEIC plus its original video.
+  bool get liveAsMotion => _p.getBool('liveAsMotion') ?? false;
+
   /// iPhone: keep the app running in the background by playing silence.
   bool get keepAlive => _p.getBool('keepAlive') ?? false;
 
@@ -193,6 +197,7 @@ class AppSettings {
     'lowBatteryPause',
     'keepAlive',
     'menuBarOnly',
+    'liveAsMotion',
   };
 
   Future<void> setToggle(String key, bool v) {
@@ -213,6 +218,7 @@ class AppSettings {
     'wifiOnly': wifiOnly,
     'lowBatteryPause': lowBatteryPause,
     'keepAlive': keepAlive,
+    'liveAsMotion': liveAsMotion,
     'menuBarOnly': menuBarOnly,
     'noAutoTo': [...noAutoTo],
     if (Platform.isMacOS) ...{

@@ -34,6 +34,7 @@ class EngineState {
   bool get wifiOnly => _s['wifiOnly'] == true;
   bool get lowBatteryPause => _s['lowBatteryPause'] != false;
   bool get keepAlive => _s['keepAlive'] == true;
+  bool get liveAsMotion => _s['liveAsMotion'] == true;
   bool get menuBarOnly => _s['menuBarOnly'] == true;
   Set<String> get noAutoTo => {
     ...(_s['noAutoTo'] as List? ?? []).cast<String>(),
