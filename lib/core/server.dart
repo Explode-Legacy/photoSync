@@ -468,7 +468,7 @@ class ReceiveServer {
     } catch (e) {
       try {
         await _reply(req, signed, e is CryptoException ? 400 : 500, {
-          'error': '$e',
+          'error': shortError(e),
         });
       } catch (_) {}
     }
@@ -643,6 +643,18 @@ class ReceiveServer {
     req.response.write(text);
     await req.response.close();
   }
+}
+
+/// The first line of an error, without platform stack traces, so the
+/// sender's Activity shows something readable.
+String shortError(Object e) {
+  var text = '$e';
+  // PlatformException(code, message, details…): keep the message.
+  final m = RegExp(r'PlatformException\([^,]*, ([^\n]*)').firstMatch(text);
+  if (m != null) text = m.group(1)!;
+  text = text.split('\n').first.trim();
+  text = text.replaceFirst(RegExp(r'^(java\.lang\.)?\w+Exception: '), '');
+  return text.length > 160 ? '${text.substring(0, 157)}…' : text;
 }
 
 /// IP addresses of this device, for showing "connect to me at ..." in the UI.

@@ -364,7 +364,13 @@ class SyncEngine {
   void _addLog(String kind, String text) {
     // Also to the system log, readable over USB for debugging.
     debugPrint('[PhotoBridge ${mode.name}] $kind: $text');
-    _log.insert(0, {'k': kind, 't': text, 'ms': _now()});
+    // Activity shows one readable line; the system log keeps it all.
+    final shown = text.split('\n').first;
+    _log.insert(0, {
+      'k': kind,
+      't': shown.length > 200 ? '${shown.substring(0, 197)}…' : shown,
+      'ms': _now(),
+    });
     if (_log.length > 100) _log.removeLast();
     _changed();
   }

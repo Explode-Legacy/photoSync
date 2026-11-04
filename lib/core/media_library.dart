@@ -1,7 +1,10 @@
 import 'dart:io';
 
 import 'package:native_exif/native_exif.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
+
+import 'motion_photo.dart';
 
 import 'server.dart' show DateFix;
 
@@ -80,6 +83,36 @@ abstract class PhotoSource {
 /// Ids of a Live Photo's video part: the photo's id plus this.
 const kLiveSuffix = '#live';
 
+/// What a file really is, from its first bytes: `image`, `video`, or null
+/// when unknown. Names and labels can be wrong; the bytes aren't.
+Future<String?> sniffKind(File file) async {
+  final List<int> h;
+  try {
+    final raf = await file.open();
+    try {
+      h = await raf.read(16);
+    } finally {
+      await raf.close();
+    }
+  } catch (_) {
+    return null;
+  }
+  bool at(int offset, String ascii) =>
+      h.length >= offset + ascii.length &&
+      String.fromCharCodes(h.sublist(offset, offset + ascii.length)) == ascii;
+  if (h.length >= 3 && h[0] == 0xFF && h[1] == 0xD8 && h[2] == 0xFF) {
+    return 'image'; // JPEG
+  }
+  if (h.length >= 4 && h[0] == 0x89 && at(1, 'PNG')) return 'image';
+  if (at(0, 'GIF8') || (at(0, 'RIFF') && at(8, 'WEBP'))) return 'image';
+  if (at(4, 'ftyp')) {
+    final brand = h.length >= 12 ? String.fromCharCodes(h.sublist(8, 12)) : '';
+    const images = {'heic', 'heix', 'heim', 'heis', 'mif1', 'msf1', 'avif'};
+    return images.contains(brand) ? 'image' : 'video'; // qt, isom, mp4…
+  }
+  return null;
+}
+
 /// Thin wrapper around photo_manager for reading and saving media.
 class MediaLibrary implements PhotoSource {
   static const _pageSize = 200;
@@ -133,8 +166,11 @@ class MediaLibrary implements PhotoSource {
   @override
   Future<List<SourceItem>> byIds(List<String> ids) async => [
     for (final id in ids)
-      if (await AssetEntity.fromId(_baseId(id)) case final a?)
-        id.endsWith(kLiveSuffix) ? _liveItem(a) : _item(a),
+      // Ids ending in [kLiveSuffix] (older versions sent the motion part
+      // separately) are now part of the photo's own Motion Photo.
+      if (!id.endsWith(kLiveSuffix))
+        if (await AssetEntity.fromId(id) case final a?)
+          Platform.isIOS && a.isLivePhoto ? _motionItem(a) : _item(a),
   ];
 
   @override
@@ -145,13 +181,12 @@ class MediaLibrary implements PhotoSource {
       ? id.substring(0, id.length - kLiveSuffix.length)
       : id;
 
-  /// The photo, plus its video part when it's a Live Photo (iPhone).
+  /// The photo; a Live Photo (iPhone) goes as an Android Motion Photo.
   Iterable<SourceItem> _items(
     AssetEntity a, {
     required bool includeVideos,
   }) sync* {
-    yield _item(a);
-    if (includeVideos && Platform.isIOS && a.isLivePhoto) yield _liveItem(a);
+    yield Platform.isIOS && a.isLivePhoto ? _motionItem(a) : _item(a);
   }
 
   SourceItem _item(AssetEntity a) => SourceItem(
@@ -162,22 +197,59 @@ class MediaLibrary implements PhotoSource {
     export: () => export(a),
   );
 
-  /// A Live Photo's motion part, sent as a video named like the photo.
-  SourceItem _liveItem(AssetEntity a) {
+  /// A Live Photo as one Motion Photo (JPEG still + MP4, see
+  /// motion_photo.dart), which Android galleries play. Falls back to the
+  /// plain original photo if either part can't be had.
+  SourceItem _motionItem(AssetEntity a) {
     final title = a.title ?? a.id;
     final dot = title.lastIndexOf('.');
-    final name = '${dot > 0 ? title.substring(0, dot) : title}.MOV';
+    final name = '${dot > 0 ? title.substring(0, dot) : title}.MP.jpg';
     return SourceItem(
-      id: '${a.id}$kLiveSuffix',
+      id: a.id,
       title: name,
       created: a.createDateTime,
       location: _locationOf(a),
       export: () async {
-        final f = await a.originFileWithSubtype;
-        return f == null ? null : ExportedAsset(f, name, 'video');
+        try {
+          // MP4 (not MOV): Motion Photos carry MP4, and it also keeps the
+          // plugin's cache from handing back the still instead.
+          final video = await a.loadFile(
+            withSubtype: true,
+            darwinFileType: PMDarwinAVFileType.mp4,
+          );
+          // The rendered still is a JPEG (the original may be HEIC).
+          final still = await a.loadFile(isOrigin: false);
+          if (video != null &&
+              still != null &&
+              await sniffKind(video) == 'video' &&
+              await _isJpeg(still)) {
+            final dir = await _motionDir();
+            final out = File(
+              '${dir.path}/${a.id.hashCode.toUnsigned(32)}-$name',
+            );
+            await buildMotionPhoto(still: still, video: video, out: out);
+            return ExportedAsset(out, name, 'image');
+          }
+        } catch (_) {
+          // Fall through to the plain photo.
+        }
+        return export(a);
       },
     );
   }
+
+  static Future<bool> _isJpeg(File f) async {
+    final raf = await f.open();
+    try {
+      final h = await raf.read(3);
+      return h.length == 3 && h[0] == 0xFF && h[1] == 0xD8 && h[2] == 0xFF;
+    } finally {
+      await raf.close();
+    }
+  }
+
+  static Future<Directory> _motionDir() async =>
+      Directory('${(await getTemporaryDirectory()).path}/motion').create();
 
   @override
   Future<Map<String, String>> albumsFor(Set<String> ids) async {
@@ -259,7 +331,11 @@ class MediaLibrary implements PhotoSource {
   /// iOS copies originals into the plugin cache; free that space.
   @override
   Future<void> releaseExports() async {
-    if (Platform.isIOS) await PhotoManager.clearFileCache();
+    if (!Platform.isIOS) return;
+    await PhotoManager.clearFileCache();
+    try {
+      await (await _motionDir()).delete(recursive: true);
+    } catch (_) {}
   }
 
   /// Saves a received file into the gallery and returns the new asset id.
@@ -275,6 +351,9 @@ class MediaLibrary implements PhotoSource {
     (double, double)? location,
     String album = '',
   }) async {
+    // Trust the content over the sender's label (a mislabelled file would
+    // otherwise be refused by Android's gallery).
+    kind = await sniffKind(file) ?? kind;
     if (Platform.isAndroid && kind == 'image') {
       await _stampExif(file.path, created, location);
     }

@@ -356,7 +356,11 @@ extension EngineSending on SyncEngine {
     }
     final exported = await export();
     if (exported == null) {
-      _addLog('error', 'Could not read ${item.title}');
+      // A Live Photo without a usable motion part: the photo itself went.
+      if (!item.id.endsWith(kLiveSuffix)) {
+        _addLog('error', 'Could not read ${item.title}');
+      }
+      await _sent.add(ledgerKey);
       return false;
     }
     final status = await _client.upload(
