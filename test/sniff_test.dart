@@ -32,4 +32,15 @@ void main() {
     expect(s, isNot(contains('\n')));
     expect(s.length, lessThanOrEqualTo(160));
   });
+
+  test('names are fixed to match the real content', () {
+    // A video that arrived named like a photo (the "MIME type image/jpeg"
+    // error), and the reverse.
+    expect(nameForKind('IMG_1.JPG', 'video', 'mov'), 'IMG_1.mov');
+    expect(nameForKind('IMG_1.MOV', 'image', 'heic'), 'IMG_1.heic');
+    // Names that already fit stay exactly as they were.
+    expect(nameForKind('IMG_1.HEIC', 'image', 'heic'), 'IMG_1.HEIC');
+    expect(nameForKind('clip.MP4', 'video', 'mov'), 'clip.MP4');
+    expect(nameForKind('noext', 'video', 'mp4'), 'noext.mp4');
+  });
 }

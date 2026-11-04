@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:native_exif/native_exif.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
@@ -83,9 +84,10 @@ abstract class PhotoSource {
 /// Ids of a Live Photo's video part: the photo's id plus this.
 const kLiveSuffix = '#live';
 
-/// What a file really is, from its first bytes: `image`, `video`, or null
-/// when unknown. Names and labels can be wrong; the bytes aren't.
-Future<String?> sniffKind(File file) async {
+/// What a file really is, from its first bytes: `image` or `video`, and the
+/// usual extension for it; null when unknown. Names and labels can be wrong;
+/// the bytes aren't.
+Future<({String kind, String ext})?> sniffType(File file) async {
   final List<int> h;
   try {
     final raf = await file.open();
@@ -101,16 +103,45 @@ Future<String?> sniffKind(File file) async {
       h.length >= offset + ascii.length &&
       String.fromCharCodes(h.sublist(offset, offset + ascii.length)) == ascii;
   if (h.length >= 3 && h[0] == 0xFF && h[1] == 0xD8 && h[2] == 0xFF) {
-    return 'image'; // JPEG
+    return (kind: 'image', ext: 'jpg');
   }
-  if (h.length >= 4 && h[0] == 0x89 && at(1, 'PNG')) return 'image';
-  if (at(0, 'GIF8') || (at(0, 'RIFF') && at(8, 'WEBP'))) return 'image';
+  if (h.length >= 4 && h[0] == 0x89 && at(1, 'PNG')) {
+    return (kind: 'image', ext: 'png');
+  }
+  if (at(0, 'GIF8')) return (kind: 'image', ext: 'gif');
+  if (at(0, 'RIFF') && at(8, 'WEBP')) return (kind: 'image', ext: 'webp');
   if (at(4, 'ftyp')) {
     final brand = h.length >= 12 ? String.fromCharCodes(h.sublist(8, 12)) : '';
-    const images = {'heic', 'heix', 'heim', 'heis', 'mif1', 'msf1', 'avif'};
-    return images.contains(brand) ? 'image' : 'video'; // qt, isom, mp4…
+    if (brand == 'avif' || brand == 'avis') return (kind: 'image', ext: 'avif');
+    const heif = {'heic', 'heix', 'heim', 'heis', 'mif1', 'msf1'};
+    if (heif.contains(brand)) return (kind: 'image', ext: 'heic');
+    return (kind: 'video', ext: brand == 'qt  ' ? 'mov' : 'mp4');
+  }
+  // QuickTime files may start with another atom before (or instead of) ftyp.
+  if (at(4, 'moov') || at(4, 'mdat') || at(4, 'wide') || at(4, 'free')) {
+    return (kind: 'video', ext: 'mov');
   }
   return null;
+}
+
+Future<String?> sniffKind(File file) async => (await sniffType(file))?.kind;
+
+const _imageExts = {
+  'jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'avif', 'tif', 'tiff', //
+  'bmp', 'dng',
+};
+const _videoExts = {'mov', 'mp4', 'm4v', '3gp', 'avi', 'mkv', 'hevc'};
+
+/// [name] with an extension that fits [kind] (Android's gallery picks the
+/// type from the name): `IMG_1.JPG` holding a video becomes `IMG_1.mov`.
+String nameForKind(String name, String kind, String ext) {
+  final dot = name.lastIndexOf('.');
+  final stem = dot > 0 ? name.substring(0, dot) : name;
+  final current = dot > 0 ? name.substring(dot + 1).toLowerCase() : '';
+  final fits = kind == 'video'
+      ? _videoExts.contains(current)
+      : _imageExts.contains(current);
+  return fits ? name : '$stem.$ext';
 }
 
 /// Thin wrapper around photo_manager for reading and saving media.
@@ -398,30 +429,40 @@ class MediaLibrary implements PhotoSource {
     (double, double)? location,
     String album = '',
   }) async {
-    // Trust the content over the sender's label (a mislabelled file would
-    // otherwise be refused by Android's gallery).
-    kind = await sniffKind(file) ?? kind;
+    // Trust the content over the sender's label and name: Android's gallery
+    // picks the type from the file name and refuses a mismatch.
+    final real = await sniffType(file);
+    if (real != null) {
+      kind = real.kind;
+      name = nameForKind(name, real.kind, real.ext);
+    }
     if (Platform.isAndroid && kind == 'image') {
       await _stampExif(file.path, created, location);
     }
     final sub = album.isEmpty ? '' : '/$album';
+    Future<AssetEntity> saveAs(String k) => k == 'video'
+        ? PhotoManager.editor.saveVideo(
+            file,
+            title: nameForKind(name, 'video', 'mp4'),
+            relativePath: 'Movies/PhotoBridge$sub',
+            creationDate: created,
+          )
+        : PhotoManager.editor.saveImageWithPath(
+            file.path,
+            title: nameForKind(name, 'image', 'jpg'),
+            relativePath: 'Pictures/PhotoBridge$sub',
+            creationDate: created,
+            latitude: location?.$1,
+            longitude: location?.$2,
+          );
     AssetEntity entity;
-    if (kind == 'video') {
-      entity = await PhotoManager.editor.saveVideo(
-        file,
-        title: name,
-        relativePath: 'Movies/PhotoBridge$sub',
-        creationDate: created,
-      );
-    } else {
-      entity = await PhotoManager.editor.saveImageWithPath(
-        file.path,
-        title: name,
-        relativePath: 'Pictures/PhotoBridge$sub',
-        creationDate: created,
-        latitude: location?.$1,
-        longitude: location?.$2,
-      );
+    try {
+      entity = await saveAs(kind);
+    } on PlatformException catch (e) {
+      // Still refused for its type ("MIME type … cannot be inserted"): the
+      // file is the other kind after all.
+      if (!'$e'.contains('MIME type')) rethrow;
+      entity = await saveAs(kind == 'video' ? 'image' : 'video');
     }
     // Android's media scanner overwrites "date taken" with the file's own
     // time when there is no EXIF date (always for videos), so set it again.

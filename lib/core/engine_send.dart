@@ -117,7 +117,7 @@ extension EngineSending on SyncEngine {
               sentTo.update(t.info.name, (n) => n + 1, ifAbsent: () => 1);
             }
           } on Exception catch (e) {
-            if (_stopAfter(e, t)) active.remove(t);
+            if (_stopAfter(e, t, file: item.title)) active.remove(t);
           }
         }
         if (i % 10 == 9) await _library.releaseExports();
@@ -148,11 +148,11 @@ extension EngineSending on SyncEngine {
   /// Logs a failed transfer to [target]. Returns true when the rest of the
   /// batch should skip it (wrong pairing code, inbound off, network gone);
   /// rethrows the unknown.
-  bool _stopAfter(Exception e, Peer target) {
+  bool _stopAfter(Exception e, Peer target, {String? file}) {
     final name = target.info.name;
     switch (e) {
       case TransferException():
-        _addLog('error', '$name: ${e.message}');
+        _addLog('error', '$name: ${file == null ? '' : '$file: '}${e.message}');
         return e.unauthorized || e.rejected;
       case IOException():
         // Network dropped: skip it, the next probe/sync resumes from here.
@@ -245,7 +245,7 @@ extension EngineSending on SyncEngine {
             );
             delivered = true;
           } on Exception catch (e) {
-            if (_stopAfter(e, t)) active.remove(t);
+            if (_stopAfter(e, t, file: f.name)) active.remove(t);
           }
         }
         if (delivered) sentNow++;
